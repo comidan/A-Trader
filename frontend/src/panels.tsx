@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   Activity, Crosscheck, Detail, NewsItem, Overview, QuoteRow, Report, Simulation, Status, StrategyRow,
   ago, api, clock, dateTime, pct, seriesColor, signed, usd, usePoll,
@@ -51,6 +51,11 @@ function ActivityLine({ a }: { a: Activity }) {
     case "kill_switch": return <>{(a.detail as { on?: boolean })?.on ? "pressed STOP ALL" : "released STOP ALL"}</>;
     case "settings_changed": return <>changed the safety settings</>;
     case "alert_triggered": return <>price alert reached</>;
+    case "dividend": return <>received a dividend of <span className="up">{usd(a.amount!)}</span> from <b>{a.symbol}</b> <span className="muted">(after {usd(a.tax!)} tax)</span></>;
+    case "split": return <>stock split on <b>{a.symbol}</b></>;
+    case "corporate_action_unhandled": return <><span className="warn-text">needs your attention:</span> <b>{a.symbol}</b></>;
+    case "symbol_unblocked": return <>released <b>{a.symbol}</b></>;
+    case "strategy_error": return <span className="warn-text">had an internal error (see logs)</span>;
     default: return <>{a.kind.replace(/_/g, " ")}</>;
   }
 }
@@ -82,6 +87,7 @@ function ActivityBody({ a }: { a: Activity }) {
       </div>
     );
   if (a.kind === "order_rejected") return <div className="feed-body"><span className="muted">Reason:</span> {a.reason}</div>;
+  if (a.kind === "split" || a.kind === "corporate_action_unhandled") return <div className="feed-body">{a.reason}</div>;
   if (a.kind === "order_cancelled" || a.kind === "order_expired")
     return <div className="feed-body muted">{a.reason}{a.unfilled_qty ? ` · ${a.unfilled_qty} shares not filled` : ""}</div>;
   return null;
@@ -170,10 +176,12 @@ const METRICS: [string, string, (s: StrategyRow) => string][] = [
   ["Broker fees", "Flat fee per executed order.", (s) => usd(s.costs.commissions)],
   ["Tax paid", "26% of each realised gain.", (s) => usd(s.costs.taxes)],
   ["AI thinking cost", "Price of the model calls, charged as they happen.", (s) => usd(s.costs.tokens, 4)],
+  ["Dividends received", "Cash paid by the companies held, after 15% US and 26% Italian tax.", (s) => usd(s.dividends)],
 ];
 
 export function Scorecard({ strategies, refresh }: { strategies: StrategyRow[]; refresh: number }) {
   const [rep] = usePoll<Report>("/api/report", [refresh], 60000);
+  const [stored] = usePoll<{ id: string; created_ts: string; report: string }[]>("/api/reports", [], 300000);
   return (
     <div>
       {rep && (
@@ -186,6 +194,14 @@ export function Scorecard({ strategies, refresh }: { strategies: StrategyRow[]; 
           ))}
           <p className="muted small">A result is only called significant with at least {rep.min_days_for_significance} trading days and less than a 5% chance of being luck. A stored copy is made every Saturday.</p>
         </div>
+      )}
+      {stored && stored.length > 0 && (
+        <details className="verdict">
+          <summary>Weekly reports saved so far ({stored.length})</summary>
+          {stored.map((r) => { const j = JSON.parse(r.report) as Report & { week: string }; return (
+            <p key={r.id}><b>{j.week}</b> <span className="muted small">({dateTime(r.created_ts)})</span>: {j.headline}
+              <span className="muted small"> {j.strategies.map((x) => `${x.name} ${pct(x.excess_return_pct)} vs buy & hold`).join(" · ")}</span></p>); })}
+        </details>
       )}
       <table className="metrics">
         <thead><tr><th />{strategies.map((s) => <th key={s.id} className="num"><span className="swatch" style={{ background: seriesColor(s.id) }} />{s.name}</th>)}</tr></thead>
@@ -354,6 +370,75 @@ export function SettingsPanel({ overview, sims, reload }: { overview: Overview; 
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ tools
+interface ReplayResult { label: string; events_replayed: number; strategies: { id: string; name: string; net_result: string; gross_result: string; fills: number; costs: string }[] }
+interface LedgerRow { seq: number; recorded_at_utc: string; kind: string; strategy_id: string | null; payload: Record<string, unknown>; hash: string }
+
+export function Tools({ overview, refresh }: { overview: Overview; refresh: number }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [day, setDay] = useState(today);
+  const [ticker, setTicker] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<ReplayResult | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [ledger] = usePoll<LedgerRow[]>(`/api/ledger?limit=20${overview.simulation ? `&sim_id=${overview.simulation.id}` : ""}`, [refresh], 20000);
+  const [open, setOpen] = useState<number | null>(null);
+  const replay = async () => {
+    setBusy(true); setMsg(null); setResult(null);
+    try { setResult(await api<ReplayResult>("/api/replay", { method: "POST", body: JSON.stringify({ start: `${day}T00:00:00+00:00`, end: `${day}T23:59:59+00:00` }) })); }
+    catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+    setBusy(false);
+  };
+  const watch = async () => {
+    try { await api(`/api/watch/${ticker.trim().toUpperCase()}`, { method: "POST" }); setMsg({ ok: true, text: `${ticker.toUpperCase()} now has a live-data slot.` }); setTicker(""); }
+    catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+  };
+  return (
+    <div className="stack">
+      {msg && <p className={msg.ok ? "ok-text" : "error"}>{msg.text}</p>}
+      <div>
+        <h3>Follow another stock</h3>
+        <div className="row">
+          <input placeholder="Ticker, e.g. PLTR" value={ticker} onChange={(e) => setTicker(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ticker && watch()} />
+          <button onClick={watch} disabled={!ticker.trim()}>Start following</button>
+        </div>
+        <p className="muted small">The agents can also ask for any US stock themselves. The price feed follows a limited number of stocks at once (see System); stocks that are held always keep their place.</p>
+      </div>
+      <div>
+        <h3>Replay a past day <span className="muted small">for checking the machinery only</span></h3>
+        <div className="banner">A replay re-runs the simple strategies on the prices this installation recorded that day. <b>It says nothing about the AI agents</b>: a model may already know what happened afterwards, so they are never replayed.</div>
+        <div className="row">
+          <label>Day <input type="date" value={day} max={today} onChange={(e) => setDay(e.target.value)} /></label>
+          <button onClick={replay} disabled={busy}>{busy ? "Replaying…" : "Run replay"}</button>
+        </div>
+        {result && (result.events_replayed === 0 ? <p className="muted">No prices were recorded on that day.</p> : (
+          <table>
+            <thead><tr><th>Strategy (replay, not a real result)</th><th className="num">Net result</th><th className="num">Before costs</th><th className="num">Costs</th><th className="num">Executions</th></tr></thead>
+            <tbody>{result.strategies.map((s) => (
+              <tr key={s.id}><td>{s.name}</td><td className="num"><Money v={Number(s.net_result)} /></td><td className="num">{signed(Number(s.gross_result))}</td>
+                <td className="num">{usd(Number(s.costs))}</td><td className="num">{s.fills}</td></tr>))}</tbody>
+          </table>))}
+      </div>
+      <div>
+        <h3>Ledger <span className="muted small">the permanent record: nothing in it can be changed or deleted</span></h3>
+        {!ledger || ledger.length === 0 ? <p className="muted">Empty.</p> : (
+          <table>
+            <thead><tr><th>#</th><th>When</th><th>Who</th><th>What</th><th>Fingerprint</th></tr></thead>
+            <tbody>{ledger.map((e) => (
+              <Fragment key={e.seq}>
+                <tr className="clickable" onClick={() => setOpen(open === e.seq ? null : e.seq)}>
+                  <td>{e.seq}</td><td className="muted">{dateTime(e.recorded_at_utc)}</td><td>{e.strategy_id ?? "you"}</td>
+                  <td>{e.kind.replace(/_/g, " ")}</td><td className="muted mono">{e.hash.slice(0, 12)}</td></tr>
+                {open === e.seq && <tr><td colSpan={5}><pre className="payload">{JSON.stringify(e.payload, null, 2)}</pre></td></tr>}
+              </Fragment>))}</tbody>
+          </table>
+        )}
+        <p className="muted small">Click a row to see everything that was recorded with it, including the prices and news seen at that moment.</p>
+      </div>
     </div>
   );
 }

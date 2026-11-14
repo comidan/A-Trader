@@ -18,7 +18,7 @@ export interface Status {
 }
 export interface StrategyRow {
   id: string; name: string; description: string; is_llm: boolean; active: boolean; thinking: boolean;
-  net_result: number; gross_result: number; net_liquidation: number; equity: number; cash: number; deposits: number;
+  net_result: number; gross_result: number; net_liquidation: number; equity: number; cash: number; deposits: number; dividends: number;
   positions: number; open_orders: number;
   costs: { commissions: number; taxes: number; tokens: number; stamp_duty: number; exit_costs_if_sold_now: number };
   prices_stale_for: string[]; prices_missing_for: string[]; suspended_positions: string[];
@@ -28,6 +28,7 @@ export interface StrategyRow {
 }
 export interface Overview {
   simulation: Simulation | null; market: MarketInfo; strategies: StrategyRow[]; kill_switch: boolean;
+  blocked: Record<string, string>; frozen: Record<string, string>;
   settings: Record<string, number | null>; not_running: Record<string, string>; server_time_utc: string;
   broker: { name: string; commission_per_order: number; tax_rate_pct: number; source: string };
 }

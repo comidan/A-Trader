@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { Curves, Overview, Simulation, Status, StrategyRow, ago, api, pct, seriesColor, signed, usd, useLive, usePoll } from "./api";
 import { EquityChart } from "./Chart";
-import { ActivityFeed, Dot, Holdings, Money, News, Scorecard, SettingsPanel, SystemPanel } from "./panels";
+import { MapView } from "./MapView";
+import { ActivityFeed, Dot, Holdings, Money, News, Scorecard, SettingsPanel, SystemPanel, Tools } from "./panels";
 
-const TABS = ["Activity", "Holdings", "News", "Scorecard", "System", "Settings"] as const;
+const TABS = ["Activity", "Map", "Holdings", "News", "Scorecard", "System", "Tools", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 function headline(o: Overview): { title: string; text: string; tone: "up" | "down" | "" } {
@@ -90,6 +91,11 @@ export function App() {
       {overview.kill_switch && <div className="banner bad">Trading is stopped. No orders are accepted until you release the stop.</div>}
       {quotes && quotes.state !== "live" && sim && <div className="banner bad"><b>Live prices are not flowing ({quotes.state.replace("_", " ")}).</b> {quotes.detail} Nothing can trade without live prices.</div>}
 
+      {Object.entries({ ...overview.frozen, ...overview.blocked }).map(([sym, why]) => (
+        <div key={sym} className="banner bad"><b>{sym} needs your attention.</b> {why}. {sym in overview.frozen ? "Nothing trades in it until this is explained." : "New purchases are refused; selling is allowed."}{" "}
+          <button onClick={() => confirm(`Trust ${sym} again and allow trading in it?`) && api(`/api/release/${sym}`, { method: "POST" }).catch((e) => alert(e.message))}>I checked, release it</button></div>
+      ))}
+
       <section className={`card hero ${h.tone}`}>
         <div>
           <div className="eyebrow">Is the AI beating the market, after all costs?</div>
@@ -128,6 +134,8 @@ export function App() {
           )}
         </nav>
         {tab === "Activity" && <ActivityFeed refresh={eventCount} strategy={filter} />}
+        {tab === "Map" && <MapView refresh={eventCount} />}
+        {tab === "Tools" && <Tools overview={overview} refresh={eventCount} />}
         {tab === "Holdings" && <Holdings strategies={overview.strategies} refresh={eventCount} />}
         {tab === "News" && <News refresh={eventCount} />}
         {tab === "Scorecard" && <Scorecard strategies={overview.strategies} refresh={eventCount} />}

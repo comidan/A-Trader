@@ -96,7 +96,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def login(request: Request, call_next):
-        if request.url.path == "/api/health" or authorised(request.headers, request.cookies):
+        if request.url.path == "/api/health":            # container health check: no login, and it grants nothing
+            return await call_next(request)
+        if authorised(request.headers, request.cookies):
             response = await call_next(request)
             if password and request.cookies.get("tl_session") != token:
                 response.set_cookie("tl_session", token, httponly=True, samesite="strict", max_age=30 * 86400)

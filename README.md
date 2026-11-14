@@ -33,15 +33,16 @@ Keys needed in `.env`:
 - `SEC_USER_AGENT_EMAIL`: contact address the SEC requires. Without it filings are not ingested.
 
 Data lives in `./data` (two SQLite files) and survives restarts: on start the engine rebuilds every
-account and open order from the ledger. The dashboard is bound to localhost because it has no
-login; on a cloud host put it behind authentication before setting `DASHBOARD_BIND=0.0.0.0`.
+account and open order from the ledger. The dashboard is bound to localhost by default. To reach
+it from elsewhere set `DASHBOARD_PASSWORD` (user name `tradelab`) and `DASHBOARD_BIND=0.0.0.0`,
+and serve it over HTTPS.
 
 To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --build`.
 
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 91 tests
+cd backend && pip install -e '.[dev]' && pytest          # 101 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -73,6 +74,7 @@ moment of the call and see what their thinking has cost.
   conversion charge (Directa fee sheet, read 2026-11-14). The account is simulated in USD.
 - **Tax:** 26% on each realised gain at the sale; losses become a credit for 4 years; fund/ETF gains
   cannot use that credit; average cost basis. 0.2% a year stamp duty on holdings, accrued daily.
+  Dividends: 15% US withholding, then 26% Italian tax on the remainder.
 - **LLM:** IBM Consulting Advantage, OpenAI-compatible. Token prices default to Anthropic list
   prices; set `LLM_PRICES` to what ICA charges you. A model without a price is refused.
 - **News:** Alpaca news stream (company news), SEC EDGAR latest-filings feed, GDELT (world news).
@@ -83,23 +85,46 @@ moment of the call and see what their thinking has cost.
   tax. Unrealised losses are not netted against unrealised gains.
 - **FinRL** was evaluated and left out: it needs training on historical data and adds little to the question.
 
+## Corporate actions
+
+Splits and cash dividends come from Alpaca's corporate actions API, checked at start, every two
+hours and at each market open, for every followed or held ticker:
+
+- **Splits** multiply the shares held before the ex-date (fractions are forfeited), keep the cost
+  basis and cancel open orders in that ticker. The pre-split price is never used for valuation.
+- **Cash dividends** are paid on the payable date for shares held before the ex-date, net of 15% US
+  withholding and 26% Italian tax.
+- **Anything else** on a holding (spin-off, merger, ticker change, ...) is not simulated: new
+  purchases of that ticker are refused and the dashboard asks you to check it.
+- **Safety net:** a price that moves more than 40% between sessions with no known split freezes the
+  ticker (no fills) until the split arrives or you release it in the dashboard.
+
+## What the AI trader sees
+
+Live quotes; each stock's adjusted history (5, 20 and 60 day change, distance from the 1-year high,
+volatility) from completed daily bars; news and filings since its last decision with their links to
+suppliers, customers and competitors; its positions with break-even prices; its recent trades and
+their after-tax results; and the notes it left for itself (its only memory, stored in the ledger).
+The prompt spells out the cost of a round trip so that it trades only when the expected move is
+worth it. Nothing here guarantees it beats buy & hold: that is what the experiment measures.
+
 ## Known limits (read before trusting a result)
 
-- **Stock splits and other corporate actions are not handled.** A split in a held ticker would
-  distort that position's value. Check held tickers around split dates.
-- **Dividends are ignored.** This understates every result, buy & hold the most.
 - **Currency:** the account is in USD; EUR/USD moves and the euro-based tax computation are ignored.
 - **SPY** is simulated as purchasable although an Italian retail account cannot buy it.
+- **Corporate actions other than splits and cash dividends** are flagged, not simulated (see above).
+  Alpaca gives no guarantee on how early it publishes an action; the price-jump freeze covers the gap.
 - **TradingAgents fetches its own data** (Yahoo Finance and others), which TradeLab cannot
   timestamp. Its orders still fill on our live quotes like everyone else's.
 - **Paper cross-check** uses one Alpaca paper account for all strategies; Alpaca's paper engine
   ignores quoted size. It is a price sanity check only.
-- **Replay** (`POST /api/replay`) is for debugging and runs the non-LLM baselines only; it is not
-  valid for LLM agents and uses quotes conflated to one per second.
-- **Not yet exercised against the live services:** the Alpaca streams, the paper mirror, the EDGAR
-  poller and the TradingAgents adapter were written from the official documentation and are covered
-  by parser and engine tests, but had no credentials available during development. The ICA calls
-  and the full Docker stack were run for real.
+- **Replay** (Tools tab) is for checking the machinery and runs the non-LLM baselines only; it is
+  not valid for LLM agents and uses quotes conflated to one per second.
+- **Not yet exercised against the live services:** the Alpaca streams and REST calls (quotes, news,
+  calendar, corporate actions, daily bars), the paper mirror, the EDGAR poller and the TradingAgents
+  adapter were written from the official documentation and are covered by parser and engine tests,
+  but no Alpaca credentials were available during development. The ICA calls and the full Docker
+  stack were run for real.
 
 ## Layout
 

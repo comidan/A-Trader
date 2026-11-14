@@ -91,3 +91,17 @@ button.danger.on { background: var(--bad); color: #fff; }
 input[type="number"] { width: 120px; } label { color: #c9cfdb; }
 footer { text-align: right; }
 @media (max-width: 640px) { .hero-side { text-align: left; } .hero-title { font-size: 24px; } .net { font-size: 26px; } main { padding: 10px; } }
+
+.map-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 14px; align-items: start; }
+.map-body svg { width: 100%; height: auto; background: #0f141d; border: 1px solid var(--line); border-radius: 10px; }
+.map-node { cursor: pointer; } .map .legend-item { cursor: default; gap: 6px; }
+.n-ticker { fill: #1f2b40; stroke: #4a5d80; stroke-width: 1.5; } .n-ticker.held { fill: #1d3a6b; stroke: var(--accent); stroke-width: 2.5; }
+.t-ticker { fill: var(--text); font-size: 11px; font-weight: 600; pointer-events: none; }
+.n-news { fill: #3a4354; stroke: #0f141d; stroke-width: 2; } .n-news.medium { fill: #b8862b; } .n-news.high { fill: #ef5b5b; }
+.l-about { stroke: #56627a; stroke-width: 1; } .l-rel { stroke: #8b6fd6; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.map-side { background: var(--card2); border-radius: 10px; padding: 12px 14px; min-height: 160px; } .map-side p { margin: 5px 0; }
+.clickable { cursor: pointer; } .clickable:hover td { background: var(--card2); }
+.payload { margin: 0; padding: 10px; background: #0e131c; border-radius: 8px; font-size: 11px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+details.verdict summary { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+.banner button { margin-left: 8px; padding: 2px 9px; font-size: 12px; }
+@media (max-width: 820px) { .map-body { grid-template-columns: 1fr; } }
