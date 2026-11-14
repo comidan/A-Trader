@@ -115,3 +115,15 @@ def test_map_and_watch_endpoints(settings):
         assert m["nodes"] == [] and m["links"] == []
         assert c.post("/api/watch/ZZZZ").status_code == 409        # asset list not loaded: refused, not guessed
         assert c.post("/api/release/AAPL").json() == {"released": "AAPL"}
+
+
+def test_strategy_loops_are_actually_running_after_creating_a_simulation_from_the_api(settings):
+    app = create_app(settings)
+    with TestClient(app) as c:
+        sim = c.post("/api/simulations", json={"name": "run"}).json()
+        c.post(f"/api/simulations/{sim['id']}/start")
+        runners = app.state.svc.engine.runners
+        assert set(runners) >= {"buy_hold", "random", "momentum", "mean_reversion"}
+        assert all(r.task is not None and not r.task.done() for r in runners.values())
+        c.post("/api/simulations", json={"name": "second"})
+        assert all(r.task is not None and not r.task.done() for r in app.state.svc.engine.runners.values())

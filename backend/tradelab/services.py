@@ -95,6 +95,7 @@ class Services:
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
+        self.loop = asyncio.get_running_loop()
         for r in self.store.last_quotes():           # last known prices, for valuation after a restart (they are stale)
             self.market.on_quote(Quote(r["symbol"], Decimal(r["bid"]), r["bid_size"], Decimal(r["ask"]), r["ask_size"],
                                        datetime.fromisoformat(r["recv_ts"]), 0, r["source"], r["exch_ts"]))
@@ -155,11 +156,12 @@ class Services:
     def _on_universe_change(self, added: list[str], removed: list[str]) -> None:
         if not self.quote_stream:
             return
-        loop = asyncio.get_running_loop()
-        if removed:
-            loop.create_task(self.quote_stream.send({"action": "unsubscribe", "quotes": removed, "bars": removed, "statuses": removed}))
+        for action, syms in (("unsubscribe", removed), ("subscribe", added)):
+            if syms:
+                asyncio.run_coroutine_threadsafe(
+                    self.quote_stream.send({"action": action, "quotes": syms, "bars": syms, "statuses": syms}), self.loop)
         if added:
-            loop.create_task(self.quote_stream.send({"action": "subscribe", "quotes": added, "bars": added, "statuses": added}))
+            self._kick.set()                      # new ticker: fetch its corporate actions now
 
     def _on_stock_message(self, m: dict[str, Any], recv_ts: datetime) -> None:
         if self.f_quotes.state == "stalled":

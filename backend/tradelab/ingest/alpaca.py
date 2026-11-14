@@ -167,9 +167,10 @@ class AlpacaStream:
                         self.last_message_at = recv_ts
                         for m in json.loads(raw, parse_float=Decimal):
                             t = m.get("T")
-                            if t == "success" and m.get("msg") == "authenticated":
-                                await ws.send(json.dumps({"action": "subscribe", **self.channels()}))
-                                backoff = 1.0
+                            if t == "success":                      # "connected", then "authenticated": not data
+                                if m.get("msg") == "authenticated":
+                                    await ws.send(json.dumps({"action": "subscribe", **self.channels()}))
+                                    backoff = 1.0
                             elif t == "subscription":
                                 self._set("live", "subscribed")
                             elif t == "error":

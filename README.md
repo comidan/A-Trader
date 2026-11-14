@@ -42,7 +42,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 101 tests
+cd backend && pip install -e '.[dev]' && pytest          # 102 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -120,11 +120,12 @@ worth it. Nothing here guarantees it beats buy & hold: that is what the experime
   ignores quoted size. It is a price sanity check only.
 - **Replay** (Tools tab) is for checking the machinery and runs the non-LLM baselines only; it is
   not valid for LLM agents and uses quotes conflated to one per second.
-- **Not yet exercised against the live services:** the Alpaca streams and REST calls (quotes, news,
-  calendar, corporate actions, daily bars), the paper mirror, the EDGAR poller and the TradingAgents
-  adapter were written from the official documentation and are covered by parser and engine tests,
-  but no Alpaca credentials were available during development. The ICA calls and the full Docker
-  stack were run for real.
+- **Verified live (2026-11-14, market closed):** Alpaca account, calendar, asset list, corporate
+  actions, daily bars, the quote/news websockets (authentication, subscription, message parsing on
+  Alpaca's test stream) and a paper order submit, lookup and cancel; the ICA calls; the Docker stack.
+- **Not yet observed:** a full trading session with live quotes and fills (the market was closed),
+  the EDGAR poller (needs your contact email), GDELT from an unthrottled network, and the
+  TradingAgents adapter (optional install). Watch the System tab on the first open-market day.
 
 ## Layout
 

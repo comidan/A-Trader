@@ -75,6 +75,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await svc.stop()
 
+    # Every endpoint that touches the engine is `async`: it runs on the event loop, the same thread that
+    # processes quotes and strategy decisions, so simulation state is never touched from two threads.
     app = FastAPI(title="TradeLab", version=__version__, lifespan=lifespan)
     app.state.svc = svc
 
@@ -110,74 +112,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "no simulation: create one first")
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/api/status")
-    def get_status() -> dict[str, Any]:
+    async def get_status() -> dict[str, Any]:
         return status()
 
     @app.get("/api/overview")
-    def overview() -> dict[str, Any]:
+    async def overview() -> dict[str, Any]:
         return svc.overview()
 
     @app.get("/api/equity")
-    def equity() -> dict[str, Any]:
+    async def equity() -> dict[str, Any]:
         return svc.equity_curves()
 
     @app.get("/api/strategies/{sid}")
-    def strategy(sid: str) -> dict[str, Any]:
+    async def strategy(sid: str) -> dict[str, Any]:
         if sid not in svc.engine.state.accounts:
             raise HTTPException(404, "unknown strategy")
         return svc.strategy_detail(sid)
 
     @app.get("/api/activity")
-    def activity(limit: int = 60, strategy_id: str | None = None) -> list[dict[str, Any]]:
+    async def activity(limit: int = 60, strategy_id: str | None = None) -> list[dict[str, Any]]:
         return svc.activity(min(max(limit, 1), 300), strategy_id)
 
     @app.get("/api/news")
-    def news(limit: int = 60) -> list[dict[str, Any]]:
+    async def news(limit: int = 60) -> list[dict[str, Any]]:
         return svc.store.news(min(max(limit, 1), 300))
 
     @app.get("/api/quotes")
-    def quotes() -> list[dict[str, Any]]:
+    async def quotes() -> list[dict[str, Any]]:
         return svc.quotes()
 
     @app.get("/api/map")
-    def relationship_map() -> dict[str, Any]:
+    async def relationship_map() -> dict[str, Any]:
         return svc.relationship_map()
 
     @app.post("/api/watch/{symbol}")
-    def watch(symbol: str) -> dict[str, Any]:
+    async def watch(symbol: str) -> dict[str, Any]:
         ok, why = svc.engine.watch(symbol.upper())
         if not ok:
             raise HTTPException(409, why)
         return {"watching": symbol.upper()}
 
     @app.post("/api/release/{symbol}")
-    def release(symbol: str) -> dict[str, Any]:
+    async def release(symbol: str) -> dict[str, Any]:
         svc.engine.release(symbol.upper())
         return {"released": symbol.upper()}
 
     @app.get("/api/report")
-    def report() -> dict[str, Any]:
+    async def report() -> dict[str, Any]:
         return svc.report()
 
     @app.get("/api/reports")
-    def reports() -> list[dict[str, Any]]:
+    async def reports() -> list[dict[str, Any]]:
         return svc.store.query("SELECT * FROM reports ORDER BY created_ts DESC LIMIT 52")
 
     @app.get("/api/crosscheck")
-    def crosscheck() -> dict[str, Any]:
+    async def crosscheck() -> dict[str, Any]:
         return crosscheck_summary(svc.store, (svc.engine.sim or {}).get("id"))
 
     # ---- operator controls
     @app.get("/api/simulations")
-    def list_simulations() -> list[dict[str, Any]]:
+    async def list_simulations() -> list[dict[str, Any]]:
         return svc.sims.list()
 
     @app.post("/api/simulations", status_code=201)
-    def new_simulation(body: NewSimulation) -> dict[str, Any]:
+    async def new_simulation(body: NewSimulation) -> dict[str, Any]:
         try:
             sim = svc.sims.create(body.name, body.starting_capital_usd or settings.starting_capital_usd, "forward",
                                   {"price_feed": settings.alpaca_feed, "broker": svc.engine.profile.name,
@@ -189,7 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return sim
 
     @app.post("/api/simulations/{sim_id}/{action}")
-    def simulation_action(sim_id: str, action: Literal["start", "pause", "resume", "end"]) -> dict[str, Any]:
+    async def simulation_action(sim_id: str, action: Literal["start", "pause", "resume", "end"]) -> dict[str, Any]:
         try:
             sim = svc.sims.transition(sim_id, action)
         except SimulationError as e:
@@ -199,18 +201,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return sim
 
     @app.put("/api/settings")
-    def put_settings(body: RiskSettings) -> dict[str, Any]:
+    async def put_settings(body: RiskSettings) -> dict[str, Any]:
         need_sim()
         return svc.engine.set_settings(body.model_dump())
 
     @app.post("/api/kill-switch/{state}")
-    def kill_switch(state: Literal["on", "off"]) -> dict[str, bool]:
+    async def kill_switch(state: Literal["on", "off"]) -> dict[str, bool]:
         need_sim()
         svc.engine.set_kill_switch(state == "on")
         return {"kill_switch": svc.engine.state.kill_switch}
 
     @app.post("/api/deposit")
-    def deposit(body: Deposit) -> dict[str, Any]:
+    async def deposit(body: Deposit) -> dict[str, Any]:
         need_sim()
         if body.strategy_id and body.strategy_id not in svc.engine.state.accounts:
             raise HTTPException(404, "unknown strategy")
@@ -223,7 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 settings.starting_capital_usd)
 
     @app.get("/api/ledger")
-    def get_ledger(limit: int = 50, sim_id: str | None = None) -> list[dict[str, Any]]:
+    async def get_ledger(limit: int = 50, sim_id: str | None = None) -> list[dict[str, Any]]:
         return [e.as_dict() for e in svc.ledger.tail(min(max(limit, 1), 500), sim_id)]
 
     @app.get("/api/ledger/verify")
@@ -249,7 +251,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(push_events())
         try:
             while True:
-                await sock.send_json(await asyncio.to_thread(snapshot))
+                await sock.send_json(snapshot())
                 await asyncio.sleep(settings.status_push_seconds)
         except (WebSocketDisconnect, RuntimeError):
             pass
