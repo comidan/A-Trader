@@ -143,6 +143,21 @@ class Ledger:
             rows = self.db.query("SELECT * FROM ledger ORDER BY seq DESC LIMIT ?", (limit,))
         return [_row_to_entry(r) for r in rows]
 
+    def entries(self, sim_id: str, kinds: tuple[str, ...] | None = None, strategy_id: str | None = None,
+                limit: int | None = None, newest_first: bool = False) -> list[LedgerEntry]:
+        sql, params = "SELECT * FROM ledger WHERE sim_id=?", [sim_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params += list(kinds)
+        if strategy_id:
+            sql += " AND strategy_id=?"
+            params.append(strategy_id)
+        sql += " ORDER BY seq " + ("DESC" if newest_first else "ASC")
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [_row_to_entry(r) for r in self.db.query(sql, tuple(params))]
+
     def count(self) -> int:
         return self.db.query("SELECT COUNT(*) AS n FROM ledger")[0]["n"]
 
