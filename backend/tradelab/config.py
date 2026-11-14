@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # IBM Consulting Advantage (OpenAI-compatible): {ica_base_url}/{ica_namespace}/chat/completions
     ica_api_key: SecretStr = SecretStr("")
-    ica_base_url: str = "https://api.remea.ica.ibm.com/ica/v1"
+    ica_base_url: str = "https://api.servicesessentials.ibm.com/v1"
     ica_namespace: Literal["chat-models", "assistants", "agents", "digital-workforce"] = "chat-models"
 
     sec_user_agent_email: str = ""
