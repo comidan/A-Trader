@@ -150,7 +150,7 @@ export function News({ refresh }: { refresh: number }) {
           <span className={`impact ${n.impact}`} title="Estimated impact, from simple rules (type of filing, key words, links to companies). Not a prediction.">{n.impact}</span>
           <div>
             <div className="feed-head">{n.url ? <a href={n.url} target="_blank" rel="noreferrer">{n.headline}</a> : n.headline}</div>
-            <div className="feed-body">
+            <div className="tickers">
               {n.symbols.map((s) => <span key={s} className="ticker">{s}</span>)}
               {n.links.map((l) => <span key={l.symbol + l.relation} className="ticker linked" title={`${l.via} is a ${l.relation} of ${l.symbol}`}>{l.symbol} · {l.relation}</span>)}
               <span className="muted small"> {n.kind === "filing" ? "Filing" : n.kind === "world" ? "World news" : "Company news"} · {n.source} · received {ago(n.recv_ts)}

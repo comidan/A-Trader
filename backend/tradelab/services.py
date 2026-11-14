@@ -57,6 +57,7 @@ class Services:
         self.mirror: PaperMirror | None = None
         self.tasks: list[asyncio.Task] = []
         self.malformed = 0
+        self._news_backfilled = False
         self.strategy_notes: dict[str, str] = {}
         self._kick = asyncio.Event()                  # set at the open: check corporate actions right now
         self.engine.relations = lambda sym: self.graph.graphs.get(sym)
@@ -207,6 +208,13 @@ class Services:
                 self.market.set_assets(await self.rest.assets())
                 self.f_ref.state, self.f_ref.last_received_at_utc = "live", iso(now_utc())
                 self.f_ref.detail = f"{len(self.market.assets)} assets, calendar to {max(self.market.calendar)}"
+                if not self._news_backfilled:
+                    # Real articles published while we were not connected. They are stored with their true
+                    # publication time and OUR receive time, so they count as late and never wake an agent.
+                    start = (now - timedelta(hours=36)).isoformat(timespec="seconds").replace("+00:00", "Z")
+                    for m in reversed(await self.rest.recent_news(self._tracked(), start)):
+                        self._on_news_message({**m, "T": "n"}, now_utc())
+                    self._news_backfilled = True
                 await asyncio.sleep(6 * 3600)
             except asyncio.CancelledError:
                 raise

@@ -105,3 +105,4 @@ footer { text-align: right; }
 details.verdict summary { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
 .banner button { margin-left: 8px; padding: 2px 9px; font-size: 12px; }
 @media (max-width: 820px) { .map-body { grid-template-columns: 1fr; } }
+.tickers { margin-top: 3px; color: #c9cfdb; line-height: 1.9; }

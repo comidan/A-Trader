@@ -80,7 +80,8 @@ export function App() {
           <span className="statuschip" title={overview.market.detail}><Dot tone={overview.market.state === "open" ? "ok" : overview.market.state === "closed" ? "off" : "warn"} />
             Market {overview.market.state}{overview.market.state === "closed" && overview.market.opens_at_utc ? ` · opens ${new Date(overview.market.opens_at_utc).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}</span>
           <span className="statuschip" title={quotes?.detail}><Dot tone={dataTone} />
-            {stale ? "Dashboard disconnected" : quotes?.state === "live" ? `Prices live · ${ago(quotes.last_received_at_utc, now)}` : `Prices ${quotes?.state.replace("_", " ")}`}</span>
+            {stale ? "Dashboard disconnected" : quotes?.state !== "live" ? `Prices ${quotes?.state.replace("_", " ")}`
+              : quotes.last_received_at_utc ? `Prices live · ${ago(quotes.last_received_at_utc, now)}` : "Price feed connected · no prices until the market opens"}</span>
           {sim && <button className={overview.kill_switch ? "danger on" : "danger"} onClick={stopAll}>{overview.kill_switch ? "Trading stopped · release" : "Stop all trading"}</button>}
         </span>
       </header>

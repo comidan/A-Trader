@@ -90,6 +90,11 @@ class AlpacaRest:
                     break
         return out
 
+    async def recent_news(self, symbols: list[str], start: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent real articles over REST, to fill the gap after a restart. Same fields as the news stream."""
+        body = await self._get(f"{DATA_HOST}/v1beta1/news", symbols=",".join(symbols), start=start, limit=limit, sort="desc")
+        return body.get("news") or []
+
     async def daily_bars(self, symbols: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
         """Split- and dividend-adjusted daily bars. `end` must be at least 15 minutes old on the free plan."""
         out: dict[str, list[dict[str, Any]]] = {}
