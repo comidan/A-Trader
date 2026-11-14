@@ -1,0 +1,21 @@
+# One command: docker compose up --build   ->  http://localhost:8080
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/data          # ledger and market data survive restarts
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # Bound to localhost: the dashboard has no login yet. Put it behind
+      # authentication before exposing it on a cloud host.
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8080}:80"
+    restart: unless-stopped
