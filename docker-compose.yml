@@ -1,7 +1,10 @@
 # One command: docker compose up --build   ->  http://localhost:8080
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        INSTALL_TRADINGAGENTS: ${INSTALL_TRADINGAGENTS:-0}
     env_file:
       - path: .env
         required: false

@@ -172,9 +172,12 @@ async def gdelt_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], boo
                     on_item(item)
                 status.state, status.last_received_at_utc = "live", iso(recv)
                 status.detail = f"polled every {int(poll_s / 60)} min (GDELT itself updates every 15 min)"
+                wait = poll_s
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                status.state, status.detail = "error", f"{type(e).__name__}: {e}"[:200]
-                log.warning("gdelt_poll_failed", extra={"error": str(e)[:200]})
-            await asyncio.sleep(poll_s)
+                status.state = "error"
+                status.detail = f"{type(e).__name__}: {e}"[:160] + " (GDELT throttles or refuses some networks; retrying every minute)"
+                log.warning("gdelt_poll_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
+                wait = min(poll_s, 60.0)
+            await asyncio.sleep(wait)

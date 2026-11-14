@@ -4,6 +4,11 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY tradelab ./tradelab
 RUN pip install --no-cache-dir .
+# Optional multi-agent strategy (TradingAgents, Apache-2.0, pinned tag). Heavy: off by default.
+ARG INSTALL_TRADINGAGENTS=0
+RUN if [ "$INSTALL_TRADINGAGENTS" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* && \
+      pip install --no-cache-dir "git+https://github.com/TauricResearch/TradingAgents@v0.7.1"; fi
 ENV DB_PATH=/data/tradelab.sqlite
 VOLUME /data
 EXPOSE 8000
