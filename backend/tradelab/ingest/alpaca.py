@@ -72,6 +72,42 @@ class AlpacaRest:
     async def assets(self) -> list[dict[str, Any]]:
         return await self._get(f"{PAPER_HOST}/v2/assets", status="active", asset_class="us_equity")
 
+    async def corporate_actions(self, symbols: list[str], start: str, end: str) -> list[dict[str, Any]]:
+        """Flat list of {type, id, symbol, ex_date, ...} from /v1/corporate-actions (docs read 2026-11-14)."""
+        out: list[dict[str, Any]] = []
+        for i in range(0, len(symbols), 50):
+            token = None
+            while True:
+                params = {"symbols": ",".join(symbols[i:i + 50]), "start": start, "end": end, "limit": 1000}
+                if token:
+                    params["page_token"] = token
+                body = await self._get(f"{DATA_HOST}/v1/corporate-actions", **params)
+                for plural, rows in (body.get("corporate_actions") or {}).items():
+                    kind = plural[:-1] if plural.endswith("s") else plural
+                    out += [{**r, "type": kind} for r in rows or []]
+                token = body.get("next_page_token")
+                if not token:
+                    break
+        return out
+
+    async def daily_bars(self, symbols: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
+        """Split- and dividend-adjusted daily bars. `end` must be at least 15 minutes old on the free plan."""
+        out: dict[str, list[dict[str, Any]]] = {}
+        for i in range(0, len(symbols), 30):
+            token = None
+            while True:
+                params = {"symbols": ",".join(symbols[i:i + 30]), "timeframe": "1Day", "start": start, "end": end,
+                          "adjustment": "all", "limit": 10000, "feed": "sip"}
+                if token:
+                    params["page_token"] = token
+                body = await self._get(f"{DATA_HOST}/v2/stocks/bars", **params)
+                for sym, bars in (body.get("bars") or {}).items():
+                    out.setdefault(sym, []).extend(bars)
+                token = body.get("next_page_token")
+                if not token:
+                    break
+        return out
+
     # ---- paper orders (cross-check only)
     async def paper_submit(self, order: dict[str, Any]) -> dict[str, Any]:
         r = await self.http.post(f"{PAPER_HOST}/v2/orders", json=order)

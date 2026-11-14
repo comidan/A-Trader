@@ -31,6 +31,8 @@ class MarketState:
         self.calendar_fetched_at: datetime | None = None
         self.bars: dict[str, deque] = {}
         self.etf_overrides = {"SPY", "QQQ"}
+        self.daily: dict[str, list[float]] = {}        # adjusted daily closes, oldest first (completed days only)
+        self.daily_received_at: datetime | None = None
 
     # ---- calendar
     def set_calendar(self, rows: list[dict[str, str]], fetched_at: datetime) -> None:
@@ -120,6 +122,23 @@ class MarketState:
 
     def on_bar(self, symbol: str, bar: dict[str, Any]) -> None:
         self.bars.setdefault(symbol, deque(maxlen=800)).append(bar)
+
+    def set_daily(self, closes: dict[str, list[float]], received_at: datetime) -> None:
+        self.daily.update(closes)
+        self.daily_received_at = received_at
+
+    def history(self, symbol: str) -> dict[str, float] | None:
+        """Past performance from completed daily bars (no value from today, nothing from the future)."""
+        c = self.daily.get(symbol)
+        if not c or len(c) < 21:
+            return None
+        ret = lambda n: round((c[-1] / c[-1 - n] - 1) * 100, 2) if len(c) > n and c[-1 - n] > 0 else None
+        daily = [c[i] / c[i - 1] - 1 for i in range(len(c) - 20, len(c)) if c[i - 1] > 0]
+        mean = sum(daily) / len(daily)
+        vol = (sum((x - mean) ** 2 for x in daily) / (len(daily) - 1)) ** 0.5 * 252 ** 0.5
+        high = max(c[-252:])
+        return {"last_close": round(c[-1], 2), "pct_5d": ret(5), "pct_20d": ret(20), "pct_60d": ret(60),
+                "pct_from_1y_high": round((c[-1] / high - 1) * 100, 2), "volatility_pct_yearly": round(vol * 100, 1)}
 
     def session_return(self, symbol: str, now: datetime, min_bars: int = 30) -> Decimal | None:
         """Return since today's first received bar, using only bars already received."""

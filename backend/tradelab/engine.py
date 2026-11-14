@@ -10,7 +10,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 from typing import Any, Callable
 
 from .accounting import SimState, apply_event, valuation
@@ -18,7 +18,7 @@ from .broker import SimBroker
 from .bus import EventBus
 from .clock import iso, now_utc
 from .config import Settings
-from .market import MarketState, Universe
+from .market import NY, MarketState, Universe
 from .models import BrokerProfile, D, OrderRequest, Quote
 from .simulations import Simulations
 from .storage.db import Ledger
@@ -41,6 +41,7 @@ class Runner:
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.next_wake_s: float | None = None
         self.last_decision_at: datetime | None = None
+        self.notes = ""
         self.task: asyncio.Task | None = None
         self.busy = False
 
@@ -94,6 +95,9 @@ class Engine:
         self._was_open = False
         self._last_snapshot: datetime | None = None
         self._suspended: set[str] = set()
+        self._explained: dict[str, str] = {}          # symbol -> day a split explained its price jump
+        self.on_market_open: Callable[[], None] | None = None
+        self.relations: Callable[[str], dict[str, Any] | None] | None = None
 
     # ------------------------------------------------------------------ lifecycle
     @property
@@ -127,6 +131,9 @@ class Engine:
             runner = Runner(self, kind, strategy)
             last = self.ledger.entries(self.sim["id"], ("decision",), kind, limit=1, newest_first=True)
             runner.last_decision_at = datetime.fromisoformat(last[0].recorded_at_utc) if last else None
+            noted = [e for e in self.ledger.entries(self.sim["id"], ("decision",), kind, limit=30, newest_first=True)
+                     if e.payload.get("notes")]
+            runner.notes = noted[0].payload["notes"] if noted else ""
             self.runners[kind] = runner
         try:
             loop = asyncio.get_running_loop() if self.autostart else None
@@ -181,6 +188,8 @@ class Engine:
 
     # ------------------------------------------------------------------ risk
     def risk_check(self, sid: str, req: OrderRequest, q: Quote, now: datetime) -> str | None:
+        if req.symbol in self.state.blocked:
+            return f"purchases blocked: {self.state.blocked[req.symbol]}"
         s = self.state.settings
         v = self.value(sid)
         if s.get("max_position_pct"):
@@ -214,6 +223,8 @@ class Engine:
             return
         for sid in self.state.accounts:
             v = self.value(sid)
+            if v["unpriced"]:
+                continue                      # never record a fake dip while a holding has no price
             self.store.queue("INSERT INTO equity_points VALUES (?,?,?,?,?,?,?,?,?)",
                              (self.sim["id"], sid, iso(now), str(v["net_liquidation"]), str(v["equity"]), str(v["cash"]),
                               str(v["net_result"]), str(v["gross_result"]), str(v["costs"])))
@@ -221,6 +232,7 @@ class Engine:
 
     # ------------------------------------------------------------------ market data in
     def on_quote(self, q: Quote) -> None:
+        self._check_overnight_jump(q)
         self.market.on_quote(q)
         self.store.add_quote(q)
         if not self.running or self.broker is None:
@@ -275,6 +287,93 @@ class Engine:
                            {"id": item["id"], "tickers": sorted(interesting)[:6], "headline": item["headline"][:160]})
         return True
 
+    # ------------------------------------------------------------------ corporate actions
+    def _check_overnight_jump(self, q: Quote) -> None:
+        """A price that moved more than 40% since the previous session with no known corporate action is not
+        trusted: the symbol is frozen (no fills) until an action explains it or the operator releases it."""
+        prev = self.market.quotes.get(q.symbol)
+        session = self.market.session(q.recv_ts)
+        if not prev or not session or prev.recv_ts >= session[0] or not q.valid() or not prev.valid():
+            return
+        ratio = (q.bid + q.ask) / (prev.bid + prev.ask)
+        today = q.recv_ts.astimezone(NY).date().isoformat()
+        if (ratio > Decimal("1.4") or ratio < Decimal("0.6")) and self._explained.get(q.symbol) != today:
+            reason = f"price moved {float(ratio - 1) * 100:+.0f}% since the last session with no known corporate action"
+            self.market.halted[q.symbol] = {"since": iso(q.recv_ts), "message": "Frozen by TradeLab", "reason": reason}
+            self.store.feed_event(iso(q.recv_ts), "corporate_actions", "ticker_frozen", f"{q.symbol}: {reason}")
+            log.error("ticker_frozen", extra={"symbol": q.symbol, "reason": reason})
+
+    def release(self, symbol: str) -> None:
+        """Operator decision: trust the price again and allow purchases."""
+        self.market.halted.pop(symbol, None)
+        if self.sim and symbol in self.state.blocked:
+            self.emit("symbol_unblocked", {"symbol": symbol, "by": "operator"})
+
+    def shares_before(self, sid: str, symbol: str, day: str) -> int:
+        """Shares of `symbol` held at the start of New York day `day`, rebuilt from the ledger."""
+        qty = 0
+        for e in self.ledger.entries(self.sim["id"], ("fill", "split"), sid):
+            p = e.payload
+            if p["symbol"] != symbol:
+                continue
+            when = datetime.fromisoformat(p["quote"]["recv_ts"] if e.kind == "fill" else e.recorded_at_utc)
+            if when.astimezone(NY).date().isoformat() >= day:
+                break
+            qty = int(p["qty_after"]) if e.kind == "split" else qty + (int(p["qty"]) if p["side"] == "buy" else -int(p["qty"]))
+        return qty
+
+    def process_corporate_actions(self, actions: list[dict[str, Any]], today: str) -> int:
+        """Apply splits and cash dividends; anything else on a held stock blocks new purchases and alerts you."""
+        if not self.sim or not self.broker:
+            return 0
+        applied = 0
+        for act in sorted(actions, key=lambda a: a.get("ex_date") or ""):
+            sym, kind, ex = act["symbol"], act["type"], act.get("ex_date")
+            if not ex:
+                continue
+            if kind in ("forward_split", "reverse_split") and ex <= today:
+                self._explained[sym] = today
+                if self.market.halted.get(sym, {}).get("message") == "Frozen by TradeLab":
+                    del self.market.halted[sym]
+            for sid, a in self.state.accounts.items():
+                key = f"{sid}:{act['id']}"
+                if key in self.state.applied_actions:
+                    continue
+                base = {"action_id": act["id"], "symbol": sym, "ex_date": ex, "source": "Alpaca corporate actions"}
+                if kind in ("forward_split", "reverse_split"):
+                    before = self.shares_before(sid, sym, ex)
+                    if ex > today or before <= 0 or a.qty(sym) <= 0:
+                        continue
+                    if act.get("new_symbol") and act["new_symbol"] != sym:
+                        self.emit("corporate_action_unhandled", {**base, "type": kind, "reason": f"reverse split with a ticker change to {act['new_symbol']}"}, sid)
+                        continue
+                    for o in self.state.open_orders(sid, sym):
+                        self.broker.cancel(o.id, "stock split")
+                    new, old = D(str(act["new_rate"])), D(str(act["old_rate"]))
+                    pre = min(before, a.qty(sym))
+                    after = a.qty(sym) - pre + int(pre * new / old)
+                    self.emit("split", {**base, "type": kind, "new_rate": str(new), "old_rate": str(old),
+                                        "qty_before": a.qty(sym), "qty_after": after}, sid)
+                    self.market.quotes.pop(sym, None)          # the last known price is pre-split: do not value with it
+                    applied += 1
+                elif kind == "cash_dividend":
+                    pay = act.get("payable_date") or ex
+                    if pay > today:
+                        continue
+                    qty = self.shares_before(sid, sym, ex)
+                    if qty <= 0:
+                        continue
+                    gross = qty * D(str(act["rate"]))
+                    us = (gross * self.profile.dividend_us_withholding).quantize(D("0.01"), ROUND_UP)
+                    it = ((gross - us) * self.profile.dividend_italian_tax).quantize(D("0.01"), ROUND_UP)
+                    self.emit("dividend", {**base, "payable_date": pay, "qty": qty, "rate": str(act["rate"]), "gross": str(gross),
+                                           "us_withholding": str(us), "italian_tax": str(it), "net": str(gross - us - it)}, sid)
+                    applied += 1
+                elif ex <= today and a.qty(sym) > 0:
+                    self.emit("corporate_action_unhandled", {**base, "type": kind, "reason": f"{kind.replace('_', ' ')} on {ex}: not simulated, check this holding"}, sid)
+                    applied += 1
+        return applied
+
     # ------------------------------------------------------------------ universe
     def sync_universe(self) -> None:
         before = set(self.universe.symbols())
@@ -318,11 +417,20 @@ class Engine:
             day, spent = self._tokens_today.get(sid, (None, D(0)))
             return D(str(cap)) - (spent if day == self.clock().date() else D(0))
 
+        trades, relations = [], {}
+        if runner.strategy.is_llm:
+            for en in self.ledger.entries(self.sim["id"], ("fill",), sid, limit=10, newest_first=True):
+                p = en.payload
+                trades.append({"at": en.recorded_at_utc[:16], "side": p["side"], "ticker": p["symbol"], "shares": p["qty"],
+                               "price": float(p["price"]),
+                               **({"result_after_tax": round(float(D(p["realized_gain"]) - D(p["tax"])), 2)} if p["side"] == "sell" else {})})
+            if self.relations:
+                relations = {s: g for s in symbols if (g := self.relations(s))}
         return Context(now, sid, wakes, self.state.accounts[sid], self.value(sid), self.broker.available_cash(sid),
                        self.market, self.universe.symbols(), self.state.open_orders(sid),
                        [a for a in self.state.alerts.values() if a["strategy_id"] == sid], news, self.profile,
                        self.market.session(now), runner.last_decision_at, D(self.sim["starting_capital_usd"]),
-                       charge, budget_left)
+                       charge, budget_left, runner.notes, trades, relations)
 
     async def step(self, runner: Runner, wakes: list[dict[str, Any]]) -> Decision | None:
         started = self.clock()
@@ -345,10 +453,12 @@ class Engine:
                         "stop_price": str(o.stop_price) if o.stop_price else None, "tif": o.tif, **o.meta}
                        for o in decision.orders],
             "cancel": decision.cancel, "alerts": decision.alerts, "watch": decision.watch,
-            "next_wake_minutes": decision.next_wake_minutes,
+            "next_wake_minutes": decision.next_wake_minutes, "notes": decision.notes,
             "quotes_seen": {s: q for s, q in seen.items() if s in relevant}, "detail": decision.detail,
         }, sid)
         runner.last_decision_at = ready
+        if decision.notes is not None:
+            runner.notes = decision.notes
         for oid in decision.cancel:
             o = self.state.orders.get(oid)
             if o and o.strategy_id == sid:
@@ -378,6 +488,8 @@ class Engine:
                 self._day_start = {sid: self.value(sid)["equity"] for sid in self.state.accounts}
                 for r in self.runners.values():
                     r.wake("market_open")
+                if self.on_market_open:
+                    self.on_market_open()
             if self._was_open and not is_open:
                 self.broker.expire_day_orders()
                 self._accrue_stamp_duty(now)

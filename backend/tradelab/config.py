@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     llm_agent_interval_minutes: float = 30
     tradingagents_tickers: str = "NVDA,AAPL,MSFT"   # one multi-agent run per ticker per day
     paper_crosscheck: bool = True
+    dashboard_password: SecretStr = SecretStr("")   # if set, the dashboard and API ask for it (user: tradelab)
     ingest_enabled: bool = True       # tests switch live connections off
     edgar_poll_seconds: float = 30
     gdelt_poll_seconds: float = 900

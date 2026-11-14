@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import logging
 from contextlib import asynccontextmanager, suppress
 from decimal import Decimal
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .. import __version__
@@ -74,6 +78,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="TradeLab", version=__version__, lifespan=lifespan)
     app.state.svc = svc
 
+    # Optional login: one shared password (user name "tradelab"). A session cookie covers the websocket.
+    password = settings.dashboard_password.get_secret_value()
+    token = hmac.new(password.encode(), b"tradelab-session", hashlib.sha256).hexdigest() if password else ""
+
+    def authorised(headers, cookies) -> bool:
+        if not password or hmac.compare_digest(cookies.get("tl_session", ""), token):
+            return True
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            try:
+                user, _, given = base64.b64decode(auth[6:]).decode().partition(":")
+                return user == "tradelab" and hmac.compare_digest(given, password)
+            except Exception:
+                return False
+        return False
+
+    @app.middleware("http")
+    async def login(request: Request, call_next):
+        if request.url.path == "/api/health" or authorised(request.headers, request.cookies):
+            response = await call_next(request)
+            if password and request.cookies.get("tl_session") != token:
+                response.set_cookie("tl_session", token, httponly=True, samesite="strict", max_age=30 * 86400)
+            return response
+        return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="TradeLab"'})
+
     def need_sim() -> None:
         if not svc.engine.sim:
             raise HTTPException(409, "no simulation: create one first")
@@ -111,6 +140,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/quotes")
     def quotes() -> list[dict[str, Any]]:
         return svc.quotes()
+
+    @app.get("/api/map")
+    def relationship_map() -> dict[str, Any]:
+        return svc.relationship_map()
+
+    @app.post("/api/watch/{symbol}")
+    def watch(symbol: str) -> dict[str, Any]:
+        ok, why = svc.engine.watch(symbol.upper())
+        if not ok:
+            raise HTTPException(409, why)
+        return {"watching": symbol.upper()}
+
+    @app.post("/api/release/{symbol}")
+    def release(symbol: str) -> dict[str, Any]:
+        svc.engine.release(symbol.upper())
+        return {"released": symbol.upper()}
 
     @app.get("/api/report")
     def report() -> dict[str, Any]:
@@ -185,6 +230,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws(sock: WebSocket) -> None:
+        if not authorised(sock.headers, sock.cookies):
+            await sock.close(code=4401)
+            return
         await sock.accept()
         sub = svc.bus.subscribe()
 

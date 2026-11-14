@@ -97,4 +97,6 @@ class BrokerProfile:
     capital_gains_tax_rate: Decimal = D("0.26")
     loss_carry_forward_years: int = 4
     stamp_duty_annual_rate: Decimal = D("0.002")  # "imposta di bollo" on securities value
+    dividend_us_withholding: Decimal = D("0.15")  # US-Italy treaty rate, withheld at source
+    dividend_italian_tax: Decimal = D("0.26")     # applied on what is left after the US withholding
     source: str = "https://www.directa.it/api/media/file/commissioni-mercato-USA.pdf (read 2026-11-14)"

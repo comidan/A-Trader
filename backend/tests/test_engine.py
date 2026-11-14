@@ -316,3 +316,116 @@ def test_daily_token_ceiling_is_off_by_default_and_stops_thinking_when_set(tmp_p
     r.step("llm_light")                                # spends 0.008 > ceiling
     d = r.step("llm_light", reason="news")
     assert d.detail == {"skipped": "token_budget"} and len(llm.calls) == 1
+
+
+# ---------------------------------------------------------------- corporate actions
+def _hold(rig, qty=10, price=100):
+    rig.quote("AAPL", price - 0.1, price)
+    rig.scripted.script = [buy(qty=qty)]
+    rig.step()
+    rig.quote("AAPL", price, price)
+
+
+SPLIT = {"id": "ca1", "type": "forward_split", "symbol": "AAPL", "ex_date": "2026-11-17", "new_rate": 4, "old_rate": 1}
+
+
+def test_forward_split_multiplies_shares_keeps_basis_and_is_applied_once(rig):
+    _hold(rig)
+    basis = rig.acct().positions["AAPL"].basis
+    assert rig.engine.process_corporate_actions([SPLIT], "2026-11-16") == 0       # not yet the ex-date
+    assert rig.engine.process_corporate_actions([SPLIT], "2026-11-17") == 1
+    assert rig.engine.process_corporate_actions([SPLIT], "2026-11-17") == 0       # idempotent
+    pos = rig.acct().positions["AAPL"]
+    assert pos.qty == 40 and pos.basis == basis and pos.avg_cost == basis / 40
+    assert rig.engine.value("scripted")["unpriced"] == ["AAPL"]                   # old price is not reused
+    restarted = rig.new_engine()
+    assert restarted.state.accounts["scripted"].qty("AAPL") == 40
+    assert restarted.process_corporate_actions([SPLIT], "2026-11-18") == 0
+
+
+def test_reverse_split_rounds_down_and_cancels_open_orders(rig):
+    _hold(rig, qty=25)
+    rig.scripted.script = [Decision([OrderRequest("AAPL", "sell", 5, "limit", limit_price=D("500"), tif="gtc")])]
+    rig.step()
+    act = {"id": "ca2", "type": "reverse_split", "symbol": "AAPL", "ex_date": "2026-11-17", "new_rate": 1, "old_rate": 10}
+    rig.engine.process_corporate_actions([act], "2026-11-17")
+    assert rig.acct().qty("AAPL") == 2 and rig.engine.state.orders == {}
+
+
+def test_shares_bought_on_or_after_the_ex_date_are_not_split_again(rig):
+    _hold(rig)
+    rig.now = OPEN + timedelta(days=1, hours=1)                                    # 17 Nov, after the split, action seen late
+    rig.market.set_calendar([{"date": "2026-11-17", "open": "09:30", "close": "16:00"}], rig.now)
+    rig.market.quotes.clear()
+    rig.quote("AAPL", 24.9, 25)
+    rig.scripted.script = [buy(qty=4)]
+    rig.step()
+    rig.quote("AAPL", 25, 25)
+    rig.engine.process_corporate_actions([SPLIT], "2026-11-17")
+    assert rig.acct().qty("AAPL") == 44                                           # 10 * 4 + 4
+
+
+def test_cash_dividend_is_paid_net_of_both_taxes_on_the_payable_date(rig):
+    _hold(rig)
+    div = {"id": "ca3", "type": "cash_dividend", "symbol": "AAPL", "ex_date": "2026-11-17", "payable_date": "2026-11-20", "rate": 0.25}
+    cash = rig.acct().cash
+    assert rig.engine.process_corporate_actions([div], "2026-11-19") == 0
+    assert rig.engine.process_corporate_actions([div], "2026-11-20") == 1
+    # gross 2.50, US withholding 0.38, Italian tax 26% of 2.12 = 0.56 (both rounded up) -> net 1.56
+    assert rig.acct().cash - cash == D("1.56") and rig.acct().dividends == D("1.56")
+    assert rig.engine.process_corporate_actions([div], "2026-11-21") == 0
+
+
+def test_no_dividend_for_shares_bought_on_the_ex_date(rig):
+    rig.now = OPEN + timedelta(minutes=30)
+    _hold(rig)
+    div = {"id": "ca4", "type": "cash_dividend", "symbol": "AAPL", "ex_date": "2026-11-16", "payable_date": "2026-11-16", "rate": 1}
+    assert rig.engine.process_corporate_actions([div], "2026-11-16") == 0
+
+
+def test_unhandled_action_on_a_holding_blocks_purchases_until_released(rig):
+    _hold(rig)
+    act = {"id": "ca5", "type": "spin_off", "symbol": "AAPL", "ex_date": "2026-11-16"}
+    rig.engine.process_corporate_actions([act], "2026-11-16")
+    rig.scripted.script = [buy(qty=1), Decision([OrderRequest("AAPL", "sell", 1)]), buy(qty=1)]
+    rig.step()
+    assert "purchases blocked" in rig.ledger.entries(rig.engine.sim["id"], ("order_rejected",))[0].payload["reason"]
+    rig.step()
+    assert rig.kinds()[-1] == "order_accepted"                                    # selling is still allowed
+    rig.engine.release("AAPL")
+    rig.step()
+    assert rig.kinds()[-1] == "order_accepted"
+
+
+def test_unexplained_overnight_price_jump_freezes_the_ticker(rig):
+    _hold(rig)
+    rig.now = OPEN + timedelta(days=1, hours=1)
+    rig.market.set_calendar([{"date": "2026-11-17", "open": "09:30", "close": "16:00"}], rig.now)
+    rig.scripted.script = [Decision([OrderRequest("AAPL", "sell", 10)])]
+    rig.quote("AAPL", 24.9, 25)                                                   # -75% with no known split
+    assert rig.market.is_halted("AAPL")
+    rig.step()
+    rig.quote("AAPL", 24.9, 25)
+    assert rig.acct().qty("AAPL") == 10                                           # nothing fills on an untrusted price
+    rig.engine.process_corporate_actions([SPLIT], "2026-11-17")                   # the split arrives and explains it
+    assert not rig.market.is_halted("AAPL") and rig.acct().qty("AAPL") == 40
+
+
+def test_llm_agent_keeps_its_notes_and_sees_history_trades_and_break_even(tmp_path):
+    first = json.dumps({"summary": "buy", "orders": [{"action": "buy", "ticker": "AAPL", "quantity": 5}],
+                        "notes": "Thesis: guidance raise. Wrong if it closes below 95."})
+    llm = FakeLLM([first, '{"escalate": true, "reason": "fill"}', json.dumps({"summary": "hold", "orders": []})])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    r.market.set_daily({"AAPL": [100 + i * 0.5 for i in range(80)]}, r.now)
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.quote("AAPL", 100, 100)
+    r.step("llm_light", reason="fill")
+    state = json.loads(llm.calls[-1][2])
+    assert state["your_notes"].startswith("Thesis: guidance raise")
+    assert state["your_recent_trades"][0] == {"at": state["your_recent_trades"][0]["at"], "side": "buy", "ticker": "AAPL", "shares": 5, "price": 100.0}
+    assert state["account"]["positions"][0]["break_even_bid_after_exit_fee"] == 103.6      # (500 + 9 + 9) / 5
+    h = state["quotes"]["AAPL"]["history"]
+    assert h["last_close"] == 139.5 and h["pct_5d"] == round((139.5 / 137 - 1) * 100, 2) and h["pct_from_1y_high"] == 0
+    restarted = r.new_engine()                       # the notes survive a restart (they live in the ledger)
+    assert restarted.runners["llm_light"].notes.startswith("Thesis")

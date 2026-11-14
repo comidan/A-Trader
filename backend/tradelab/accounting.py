@@ -41,6 +41,7 @@ class Account:
     taxes: Decimal = D(0)
     token_cost: Decimal = D(0)
     stamp_duty: Decimal = D(0)
+    dividends: Decimal = D(0)       # net of US withholding and Italian tax
     realized_gain: Decimal = D(0)   # before tax, after commissions
     fills: int = 0
     orders: int = 0
@@ -94,6 +95,8 @@ class SimState:
     strategies: dict[str, dict[str, Any]] = field(default_factory=dict)
     kill_switch: bool = False
     settings: dict[str, Any] = field(default_factory=dict)
+    applied_actions: set[str] = field(default_factory=set)       # "<strategy>:<corporate action id>"
+    blocked: dict[str, str] = field(default_factory=dict)        # symbol -> why new purchases are refused
 
     def open_orders(self, strategy_id: str | None = None, symbol: str | None = None) -> list[Order]:
         return [o for o in self.orders.values()
@@ -131,6 +134,27 @@ def apply_event(state: SimState, kind: str, strategy_id: str | None, p: dict[str
         state.alerts[p["id"]] = {**p, "strategy_id": strategy_id}
     elif kind in ("alert_triggered", "alert_cleared"):
         state.alerts.pop(p["id"], None)
+    elif kind == "split":
+        # Shares held before the ex-date are multiplied by new/old (rounded down: the fraction is forfeited,
+        # conservative). The total cost basis does not change.
+        a = state.accounts[strategy_id]
+        state.applied_actions.add(f"{strategy_id}:{p['action_id']}")
+        pos = a.positions.get(p["symbol"])
+        if pos:
+            pos.qty = int(p["qty_after"])
+            if pos.qty == 0:
+                del a.positions[p["symbol"]]
+    elif kind == "dividend":
+        a = state.accounts[strategy_id]
+        state.applied_actions.add(f"{strategy_id}:{p['action_id']}")
+        a.cash += d(p["net"])
+        a.dividends += d(p["net"])
+        a.taxes += d(p["us_withholding"]) + d(p["italian_tax"])
+    elif kind == "corporate_action_unhandled":
+        state.applied_actions.add(f"{strategy_id}:{p['action_id']}")
+        state.blocked[p["symbol"]] = p["reason"]
+    elif kind == "symbol_unblocked":
+        state.blocked.pop(p["symbol"], None)
     elif kind == "kill_switch":
         state.kill_switch = bool(p["on"])
     elif kind == "settings_changed":

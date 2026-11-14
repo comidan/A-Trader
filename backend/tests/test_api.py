@@ -89,3 +89,29 @@ def test_operator_controls(settings):
         assert {a["kind"] for a in acts} >= {"cash_deposit", "kill_switch", "settings_changed"}
         assert c.get("/api/strategies/buy_hold").json()["positions"] == []
         assert c.get("/api/strategies/nope").status_code == 404
+
+
+def test_optional_password_protects_api_and_websocket(settings):
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    from pydantic import SecretStr
+    protected = settings.model_copy(update={"dashboard_password": SecretStr("s3cret")})
+    with TestClient(create_app(protected)) as c:
+        assert c.get("/api/health").status_code == 200
+        assert c.get("/api/overview").status_code == 401
+        assert c.get("/api/overview", auth=("tradelab", "wrong")).status_code == 401
+        with pytest.raises(WebSocketDisconnect):
+            with c.websocket_connect("/ws"):
+                pass
+        assert c.get("/api/overview", auth=("tradelab", "s3cret")).status_code == 200
+        assert c.get("/api/overview").status_code == 200           # the session cookie now covers API and websocket
+        with c.websocket_connect("/ws") as ws:
+            assert ws.receive_json()["type"] == "tick"
+
+
+def test_map_and_watch_endpoints(settings):
+    with TestClient(create_app(settings)) as c:
+        m = c.get("/api/map").json()
+        assert m["nodes"] == [] and m["links"] == []
+        assert c.post("/api/watch/ZZZZ").status_code == 409        # asset list not loaded: refused, not guessed
+        assert c.post("/api/release/AAPL").json() == {"released": "AAPL"}

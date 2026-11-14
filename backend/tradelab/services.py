@@ -58,6 +58,9 @@ class Services:
         self.tasks: list[asyncio.Task] = []
         self.malformed = 0
         self.strategy_notes: dict[str, str] = {}
+        self._kick = asyncio.Event()                  # set at the open: check corporate actions right now
+        self.engine.relations = lambda sym: self.graph.graphs.get(sym)
+        self.f_ca = self.feeds.register(FeedStatus("corporate_actions", "Alpaca corporate actions (splits, dividends) and daily history"))
 
     # ------------------------------------------------------------------ strategies
     def make_strategy(self, kind: str, sim: dict[str, Any]):
@@ -104,6 +107,9 @@ class Services:
         if key and secret:
             self.rest = AlpacaRest(key, secret, s.alpaca_feed)
             self._spawn(self._reference_loop())
+            self._spawn(self._corporate_actions_loop())
+            self._spawn(self._history_loop())
+            self.engine.on_market_open = lambda: self._kick.set()
             self.quote_stream = AlpacaStream(f"{STREAM_HOST}/v2/{s.alpaca_feed}", key, secret, self.f_quotes,
                                              self._on_stock_message, self._channels, self._on_feed_state("alpaca_quotes"))
             self.engine.on_universe_change = self._on_universe_change
@@ -207,6 +213,53 @@ class Services:
                 log.warning("reference_refresh_failed", extra={"error": str(e)[:200]})
                 await asyncio.sleep(60)
 
+    def _tracked(self) -> list[str]:
+        syms = set(self.engine.universe.symbols())
+        for a in self.engine.state.accounts.values():
+            syms |= set(a.positions)
+        return sorted(syms)
+
+    async def _corporate_actions_loop(self) -> None:
+        """Splits and dividends for every watched or held ticker: at start, every 2 hours and at each market open."""
+        while True:
+            try:
+                now = now_utc().astimezone(NY)
+                acts = await self.rest.corporate_actions(self._tracked(), (now - timedelta(days=45)).date().isoformat(),
+                                                         (now + timedelta(days=3)).date().isoformat())
+                n = self.engine.process_corporate_actions(acts, now.date().isoformat())
+                self.f_ca.state, self.f_ca.last_received_at_utc = "live", iso(now_utc())
+                self.f_ca.detail = f"{len(acts)} actions known for {len(self._tracked())} tickers; checked every 2 h and at the open"
+                if n:
+                    self.bus.publish("corporate_actions", {"applied": n})
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.f_ca.state, self.f_ca.detail = "error", f"{type(e).__name__}: {e}"[:200]
+                log.warning("corporate_actions_failed", extra={"error": str(e)[:200]})
+            self._kick.clear()
+            try:
+                await asyncio.wait_for(self._kick.wait(), 7200 if self.f_ca.state == "live" else 120)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _history_loop(self) -> None:
+        """Adjusted daily closes (completed days only) so the agents can see each stock's recent past."""
+        while True:
+            wait = 6 * 3600
+            try:
+                now = now_utc()
+                bars = await self.rest.daily_bars(self._tracked(), (now - timedelta(days=400)).date().isoformat(),
+                                                  (now - timedelta(minutes=20)).isoformat(timespec="seconds").replace("+00:00", "Z"))
+                today = now.astimezone(NY).date().isoformat()
+                closes = {s: [float(b["c"]) for b in rows if b["t"][:10] < today] for s, rows in bars.items()}
+                self.market.set_daily(closes, now_utc())
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                wait = 300
+                log.warning("history_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
+            await asyncio.sleep(wait)
+
     async def _tick_loop(self) -> None:
         n = 0
         while True:
@@ -285,7 +338,7 @@ class Services:
                     "active": sid in e.runners, "thinking": e.runners[sid].busy if sid in e.runners else False,
                     "net_result": float(v["net_result"]), "gross_result": float(v["gross_result"]),
                     "net_liquidation": float(v["net_liquidation"]), "equity": float(v["equity"]), "cash": float(v["cash"]),
-                    "deposits": float(a.deposits), "positions": len(a.positions), "open_orders": len(e.state.open_orders(sid)),
+                    "deposits": float(a.deposits), "dividends": float(a.dividends), "positions": len(a.positions), "open_orders": len(e.state.open_orders(sid)),
                     "costs": {"commissions": float(a.commissions), "taxes": float(a.taxes), "tokens": float(a.token_cost),
                               "stamp_duty": float(a.stamp_duty), "exit_costs_if_sold_now": float(v["exit_costs"])},
                     "prices_stale_for": stale if not e.market.is_open(now) else [], "prices_missing_for": v["unpriced"],
@@ -295,7 +348,8 @@ class Services:
             for r in rows:
                 r["vs_buy_hold_pct"] = r["return_pct"] - bh["return_pct"] if bh else None
             rows.sort(key=lambda r: r["net_result"], reverse=True)
-        return {"simulation": sim, "market": e.market.describe(now), "strategies": rows,
+        return {"simulation": sim, "market": e.market.describe(now), "strategies": rows, "blocked": e.state.blocked,
+                "frozen": {s: h["reason"] for s, h in e.market.halted.items() if h.get("message") == "Frozen by TradeLab"},
                 "kill_switch": e.state.kill_switch, "settings": e.state.settings if sim else {},
                 "not_running": self.strategy_notes, "server_time_utc": iso(now),
                 "broker": {"name": e.profile.name, "commission_per_order": float(e.profile.commission_per_order),
@@ -350,7 +404,8 @@ class Services:
         if not e.sim:
             return []
         kinds = ("fill", "decision", "order_rejected", "order_cancelled", "order_expired", "cash_deposit", "kill_switch",
-                 "settings_changed", "alert_triggered", "strategy_error")
+                 "settings_changed", "alert_triggered", "strategy_error", "split", "dividend", "corporate_action_unhandled",
+                 "symbol_unblocked")
         entries = self.ledger.entries(e.sim["id"], kinds, sid, limit=limit * 3, newest_first=True)
         news_ids: set[str] = set()
         out = []
@@ -386,6 +441,13 @@ class Services:
                 if p.get("by") != "operator":
                     continue
                 row.update(amount=float(p["amount"]))
+            elif en.kind == "dividend":
+                row.update(symbol=p["symbol"], amount=float(p["net"]), qty=p["qty"],
+                           tax=float(p["us_withholding"]) + float(p["italian_tax"]))
+            elif en.kind == "split":
+                row.update(symbol=p["symbol"], qty=p["qty_after"], reason=f"{p['new_rate']}-for-{p['old_rate']} split: {p['qty_before']} shares became {p['qty_after']}")
+            elif en.kind in ("corporate_action_unhandled", "symbol_unblocked"):
+                row.update(symbol=p["symbol"], reason=p.get("reason", "released by you"))
             else:
                 row.update(detail=p)
             out.append(row)
@@ -398,6 +460,46 @@ class Services:
                 if row.get("news_ids"):
                     row["news"] = [titles[i] for i in row["news_ids"] if i in titles]
         return out
+
+    def relationship_map(self, hours: int = 24, max_news: int = 30) -> dict[str, Any]:
+        """Nodes and links between recent news, the tickers they touch and the companies related to them."""
+        e, now = self.engine, now_utc()
+        recent = self.store.news(200, since=iso(now - timedelta(hours=hours)))
+        items = [n for n in recent if n["symbols"] or n["links"]][:max_news]
+        if not items:
+            items = [n for n in self.store.news(300) if n["symbols"] or n["links"]][:max_news]
+        held: dict[str, list[str]] = {}
+        for sid, a in e.state.accounts.items():
+            for sym in a.positions:
+                held.setdefault(sym, []).append(e.state.strategies[sid]["name"])
+        nodes: dict[str, dict[str, Any]] = {}
+        links: list[dict[str, str]] = []
+
+        def ticker(sym: str) -> str:
+            nodes.setdefault("T:" + sym, {"id": "T:" + sym, "type": "ticker", "label": sym, "name": e.market.name(sym),
+                                          "held_by": held.get(sym, []), "watched": sym in e.universe.symbols()})
+            return "T:" + sym
+
+        for sym in held:
+            ticker(sym)
+        for n in items:
+            nid = "N:" + n["id"]
+            nodes[nid] = {"id": nid, "type": n["kind"], "label": n["headline"][:140], "impact": n["impact"],
+                          "source": n["source"], "url": n["url"], "received_at_utc": n["recv_ts"]}
+            for sym in n["symbols"][:6]:
+                links.append({"a": nid, "b": ticker(sym), "kind": "about"})
+            for l in n["links"][:6]:
+                links.append({"a": nid, "b": ticker(l["symbol"]), "kind": l["relation"], "via": l["via"]})
+        present = {k[2:] for k in nodes if k.startswith("T:")}
+        for sym in list(present):
+            g = self.graph.graphs.get(sym) or {}
+            for rel in ("suppliers", "customers", "competitors"):
+                for c in g.get(rel, []):
+                    other = str(c.get("ticker") or "").upper()
+                    if other and other != sym and (other in present or sym in held):
+                        links.append({"a": ticker(sym), "b": ticker(other), "kind": rel[:-1], "via": c.get("name", other)})
+        return {"nodes": list(nodes.values()), "links": links, "generated_at_utc": iso(now),
+                "note": "Company relationships come from each company's latest annual report (10-K), read once by the AI."}
 
     def quotes(self) -> list[dict[str, Any]]:
         e, now = self.engine, now_utc()

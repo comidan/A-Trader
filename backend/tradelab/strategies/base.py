@@ -30,6 +30,9 @@ class Context:
     starting_cash: Decimal
     charge_tokens: Callable[[dict[str, Any]], None]     # records an LLM call's cost against this account, immediately
     token_budget_left: Callable[[], Decimal | None]     # None = no ceiling
+    notes: str = ""                                     # the strategy's own notes from its previous decision
+    recent_trades: list[dict[str, Any]] = field(default_factory=list)
+    relations: dict[str, Any] = field(default_factory=dict)   # company graph for held / watched tickers
 
     def quote(self, symbol: str) -> Quote | None:
         return self.market.fresh_quote(symbol, self.now)
@@ -43,6 +46,7 @@ class Decision:
     watch: list[str] = field(default_factory=list)
     next_wake_minutes: float | None = None
     summary: str = ""
+    notes: str | None = None                 # kept for the next decision
     detail: dict[str, Any] = field(default_factory=dict)            # anything worth keeping in the ledger
 
 
