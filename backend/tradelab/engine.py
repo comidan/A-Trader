@@ -74,10 +74,11 @@ class Runner:
 class Engine:
     def __init__(self, settings: Settings, ledger: Ledger, sims: Simulations, bus: EventBus, market: MarketState,
                  store: MarketStore, strategy_factory: Callable[[str, dict[str, Any]], Strategy | None],
-                 clock: Callable[[], datetime] = now_utc) -> None:
+                 clock: Callable[[], datetime] = now_utc, autostart: bool = True) -> None:
         self.settings, self.ledger, self.sims, self.bus = settings, ledger, sims, bus
         self.market, self.store, self.clock, self.factory = market, store, clock, strategy_factory
         self.profile = BrokerProfile()
+        self.autostart = autostart
         self.universe = Universe(settings.core_list, settings.capacity)
         self.sim: dict[str, Any] | None = None
         self.state = SimState()
@@ -128,8 +129,8 @@ class Engine:
             runner.last_decision_at = datetime.fromisoformat(last[0].recorded_at_utc) if last else None
             self.runners[kind] = runner
         try:
-            loop = asyncio.get_running_loop()
-            for r in self.runners.values():
+            loop = asyncio.get_running_loop() if self.autostart else None
+            for r in self.runners.values() if loop else ():
                 r.task = loop.create_task(r.run())
         except RuntimeError:
             pass                                    # no loop (tests drive step() directly)

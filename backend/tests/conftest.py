@@ -24,5 +24,5 @@ def sims(db, ledger):
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings(_env_file=None, db_path=str(tmp_path / "api.sqlite"), status_push_seconds=0.05,
+    return Settings(_env_file=None, db_path=str(tmp_path / "api.sqlite"), status_push_seconds=0.05, ingest_enabled=False,
                     alpaca_api_key="k-secret-value", alpaca_api_secret="s-secret-value")

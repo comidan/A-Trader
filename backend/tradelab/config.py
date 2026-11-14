@@ -40,7 +40,9 @@ class Settings(BaseSettings):
     llm_prices: dict[str, list[float]] = {"claude-haiku-5-5": [0.10, 0.50], "claude-sonnet-5-5": [2, 10],
                                           "claude-opus-5-5": [4, 20]}
     llm_agent_interval_minutes: float = 30
+    tradingagents_tickers: str = "NVDA,AAPL,MSFT"   # one multi-agent run per ticker per day
     paper_crosscheck: bool = True
+    ingest_enabled: bool = True       # tests switch live connections off
     edgar_poll_seconds: float = 30
     gdelt_poll_seconds: float = 900
     log_level: str = "INFO"
