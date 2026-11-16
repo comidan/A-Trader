@@ -434,7 +434,8 @@ class Engine:
                        self.market, self.universe.symbols(), self.state.open_orders(sid),
                        [a for a in self.state.alerts.values() if a["strategy_id"] == sid], news, self.profile,
                        self.market.session(now), runner.last_decision_at, D(self.sim["starting_capital_usd"]),
-                       charge, budget_left, runner.notes, trades, relations)
+                       charge, budget_left, runner.notes, trades, relations,
+                       self.value("buy_hold")["net_result"] if "buy_hold" in self.state.accounts else None)
 
     async def step(self, runner: Runner, wakes: list[dict[str, Any]]) -> Decision | None:
         started = self.clock()

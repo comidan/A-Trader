@@ -441,3 +441,30 @@ def test_llm_agent_sees_market_wide_world_news_but_not_low_impact_noise(tmp_path
     r.step("llm_light")
     seen = [n["headline"] for n in json.loads(llm.calls[0][2])["news_since_your_last_decision"]]
     assert seen == ["Fed signals rate cut"]
+
+
+def test_ai_trader_cannot_buy_the_benchmark_and_sees_text_movers_and_the_gap(tmp_path):
+    reply = json.dumps({"summary": "x", "orders": [{"action": "buy", "ticker": "SPY", "quantity": 2},
+                                                   {"action": "buy", "ticker": "AAPL", "quantity": 3}]})
+    llm = FakeLLM([reply])
+    r = EngineRig(tmp_path, strategies="buy_hold,llm_light", llm=llm)
+    r.market.set_daily({"AAPL": [100 + i for i in range(80)], "SPY": [500 + i * 0.5 for i in range(80)]}, r.now)
+    r.market.set_movers({"gainers": [{"symbol": "MSFT", "percent_change": 6.2, "price": 410}, {"symbol": "ABCW", "percent_change": 300, "price": 0.02}],
+                         "losers": [], "most_active": [{"symbol": "AAPL"}, {"symbol": "PORT.WS"}]}, r.now)
+    r.quote("AAPL", 99.9, 100)
+    r.quote("SPY", 499.9, 500)
+    r.engine.on_news({"id": "n1", "kind": "filing", "source": "SEC EDGAR", "recv_ts": r.now.isoformat(), "headline": "8-K filed by Apple",
+                      "symbols": ["AAPL"], "links": [], "impact": "high", "extra": {"text": "Revenue rose 12%. " * 300, "text_chars_total": 5400}})
+    r.step("llm_light")
+    state = json.loads(llm.calls[0][2])
+    item = state["news_since_your_last_decision"][0]
+    assert item["text"].startswith("Revenue rose 12%.") and len(item["text"]) == 2500 and item["text_truncated_from_chars"] == 5400
+    assert state["market_movers"]["gainers"] == [{"ticker": "MSFT", "today_pct": 6.2, "price": 410.0}]     # warrant and penny stock dropped
+    assert state["market_movers"]["most_traded"] == ["AAPL"]
+    assert state["benchmark"] == {"buy_and_hold_sp500_net_result": 0.0, "you_minus_benchmark": 0.0}
+    h = state["quotes"]["AAPL"]["history"]
+    assert h["vs_spy_20d"] == round(h["pct_20d"] - (539.5 / 529.5 - 1) * 100, 2)
+    accepted = [e.payload["order"]["symbol"] for e in r.ledger.entries(r.engine.sim["id"], ("order_accepted",), "llm_light")]
+    assert accepted == ["AAPL"]                                                   # the SPY purchase never reached the broker
+    d = r.ledger.entries(r.engine.sim["id"], ("decision",), "llm_light")[0].payload
+    assert d["detail"]["index_fund_buys_refused"] == ["SPY"]

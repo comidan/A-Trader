@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 106 tests
+cd backend && pip install -e '.[dev]' && pytest          # 108 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -104,14 +104,23 @@ hours and at each market open, for every followed or held ticker:
 - **Safety net:** a price that moves more than 40% between sessions with no known split freezes the
   ticker (no fills) until the split arrives or you release it in the dashboard.
 
-## What the AI trader sees
+## What the AI trader sees and how it is told to work
 
-Live quotes; each stock's adjusted history (5, 20 and 60 day change, distance from the 1-year high,
-volatility) from completed daily bars; news and filings since its last decision with their links to
-suppliers, customers and competitors; its positions with break-even prices; its recent trades and
-their after-tax results; and the notes it left for itself (its only memory, stored in the ledger).
-The prompt spells out the cost of a round trip so that it trades only when the expected move is
-worth it. Nothing here guarantees it beats buy & hold: that is what the experiment measures.
+It is instructed as a professional active trader whose job is to beat the S&P 500 by buying and
+selling stocks. It may not buy broad index funds (`LLM_ALLOW_INDEX_FUNDS=false`): holding the
+benchmark is not trading. At each decision it receives:
+
+- live quotes, with each stock's adjusted history and its performance against SPY over 20 and 60 days;
+- the gap between its own result and buy & hold;
+- news and filings since its last decision, with links to suppliers, customers and competitors, and
+  the actual text of the most important articles and 8-K press releases (not only headlines);
+- today's biggest movers and most traded stocks across the whole US market, so it can look beyond
+  the followed tickers and ask for any of them;
+- its positions with break-even prices, its recent trades with after-tax results, and its own
+  trading journal (its only memory, stored in the ledger).
+
+None of this guarantees it beats buy & hold: commissions, tax and the pessimistic free price feed
+all weigh on an active trader. That is what the experiment measures.
 
 ## Known limits (read before trusting a result)
 

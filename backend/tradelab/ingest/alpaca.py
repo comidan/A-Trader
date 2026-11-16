@@ -92,8 +92,16 @@ class AlpacaRest:
 
     async def recent_news(self, symbols: list[str], start: str, limit: int = 50) -> list[dict[str, Any]]:
         """Recent real articles over REST, to fill the gap after a restart. Same fields as the news stream."""
-        body = await self._get(f"{DATA_HOST}/v1beta1/news", symbols=",".join(symbols), start=start, limit=limit, sort="desc")
+        body = await self._get(f"{DATA_HOST}/v1beta1/news", symbols=",".join(symbols), start=start, limit=limit, sort="desc",
+                               include_content="true")
         return body.get("news") or []
+
+    async def screener(self) -> dict[str, Any]:
+        """Today's biggest movers and most traded stocks across the whole US market (Alpaca screener)."""
+        movers = await self._get(f"{DATA_HOST}/v1beta1/screener/stocks/movers", top=50)
+        actives = await self._get(f"{DATA_HOST}/v1beta1/screener/stocks/most-actives", top=30, by="volume")
+        return {"gainers": movers.get("gainers") or [], "losers": movers.get("losers") or [],
+                "most_active": actives.get("most_actives") or [], "last_updated": movers.get("last_updated")}
 
     async def daily_bars(self, symbols: list[str], start: str, end: str) -> dict[str, list[dict[str, Any]]]:
         """Split- and dividend-adjusted daily bars. `end` must be at least 15 minutes old on the free plan."""

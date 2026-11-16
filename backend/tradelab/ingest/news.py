@@ -69,7 +69,9 @@ def finish(item: dict[str, Any], graph: Any | None) -> dict[str, Any]:
 def from_alpaca(m: dict[str, Any], recv_ts: datetime) -> dict[str, Any] | None:
     if m.get("T") != "n" or not m.get("headline"):
         return None
-    return {"id": f"alpaca:{m['id']}", "kind": "company", "source": f"Alpaca news ({m.get('source') or 'unknown'})",
+    text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", m.get("content") or "")).split())
+    return {"extra": {"text": text[:4000], "text_chars_total": len(text)} if text else {},
+            "id": f"alpaca:{m['id']}", "kind": "company", "source": f"Alpaca news ({m.get('source') or 'unknown'})",
             "recv_ts": iso(recv_ts), "published_ts": m.get("created_at"), "headline": m["headline"],
             "summary": m.get("summary") or "", "url": m.get("url") or "", "symbols": list(m.get("symbols") or [])}
 
@@ -182,6 +184,21 @@ async def rss_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], bool]
             await asyncio.sleep(poll_s)
 
 
+def pick_filing_document(index: dict[str, Any]) -> str | None:
+    """From an EDGAR filing directory listing, the document worth reading: the press release (exhibit 99) if
+    there is one, else the first main .htm document."""
+    names = [i.get("name", "") for i in (index.get("directory") or {}).get("item", [])]
+    docs = [n for n in names if n.lower().endswith((".htm", ".html")) and "index" not in n.lower()]
+    press = [n for n in docs if re.search(r"ex[-_]?99", n, re.I)]
+    return (press or docs or [None])[0]
+
+
+def filing_text(raw_html: str, limit: int = 6000) -> dict[str, Any]:
+    text = re.sub(r"(?is)<(script|style|ix:header).*?</\1>", " ", raw_html)
+    text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
+    return {"text": text[:limit], "text_chars_total": len(text)}
+
+
 class SecClient:
     """SEC fair-access: declared User-Agent with a contact address, well under 10 requests/second."""
 
@@ -205,7 +222,22 @@ class SecClient:
         return out
 
 
-async def edgar_loop(sec: SecClient, status: FeedStatus, on_item: Callable[[dict[str, Any]], bool], poll_s: float) -> None:
+async def attach_filing_text(sec: SecClient, item: dict[str, Any]) -> None:
+    """Fetch the press release / main document of a filing and attach its text (failures leave the item as is)."""
+    try:
+        cik, acc = item["extra"]["cik"], item["extra"]["accession"].replace("-", "")
+        base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc}"
+        doc = pick_filing_document((await sec.get(f"{base}/index.json")).json())
+        if doc:
+            item["extra"].update(filing_text((await sec.get(f"{base}/{doc}")).text), document=doc)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.warning("filing_text_failed", extra={"filing": item["id"], "error": f"{type(e).__name__}: {e}"[:200]})
+
+
+async def edgar_loop(sec: SecClient, status: FeedStatus, on_item: Callable[[dict[str, Any]], bool], poll_s: float,
+                     followed: Callable[[], set[str]] = lambda: set(), seen: Callable[[str], bool] = lambda _id: False) -> None:
     ciks: dict[int, str] = {}
     fetched_ciks: datetime | None = None
     failures = 0
@@ -219,6 +251,9 @@ async def edgar_loop(sec: SecClient, status: FeedStatus, on_item: Callable[[dict
                 recv = now_utc()
                 for item in parse_edgar_atom(r.text, recv, ciks):
                     if item["extra"]["form"].split("/")[0] in ("8-K", "10-Q", "10-K"):
+                        # read the document itself for companies we follow (once per filing)
+                        if item["extra"]["form"] == "8-K" and set(item["symbols"]) & followed() and not seen(item["id"]):
+                            await attach_filing_text(sec, item)
                         new += on_item(item)
                 status.last_received_at_utc = iso(recv)
             status.state, status.detail = "live", f"polled every {int(poll_s)}s"

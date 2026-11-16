@@ -33,6 +33,7 @@ class Context:
     notes: str = ""                                     # the strategy's own notes from its previous decision
     recent_trades: list[dict[str, Any]] = field(default_factory=list)
     relations: dict[str, Any] = field(default_factory=dict)   # company graph for held / watched tickers
+    benchmark_net_result: Decimal | None = None             # what buy & hold has made so far, same start
 
     def quote(self, symbol: str) -> Quote | None:
         return self.market.fresh_quote(symbol, self.now)

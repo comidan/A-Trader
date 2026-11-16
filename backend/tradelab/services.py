@@ -83,7 +83,8 @@ class Services:
                 if m not in s.llm_prices:
                     self.strategy_notes[kind] = f"not running: no token price configured for {m}"
                     return None
-            return LLMLightAgent(self.llm, s.llm_triage_model, s.llm_decision_model, s.llm_agent_interval_minutes)
+            return LLMLightAgent(self.llm, s.llm_triage_model, s.llm_decision_model, s.llm_agent_interval_minutes,
+                                 s.llm_allow_index_funds)
         if kind == "tradingagents":
             if not tradingagents_adapter.available():
                 self.strategy_notes[kind] = "not installed (build with INSTALL_TRADINGAGENTS=1)"
@@ -112,6 +113,7 @@ class Services:
             self._spawn(self._reference_loop())
             self._spawn(self._corporate_actions_loop())
             self._spawn(self._history_loop())
+            self._spawn(self._screener_loop())
             self.engine.on_market_open = lambda: self._kick.set()
             self.quote_stream = AlpacaStream(f"{STREAM_HOST}/v2/{s.alpaca_feed}", key, secret, self.f_quotes,
                                              self._on_stock_message, self._channels, self._on_feed_state("alpaca_quotes"))
@@ -129,7 +131,9 @@ class Services:
                 f.state, f.detail = "error", "ALPACA_API_KEY / ALPACA_API_SECRET missing in .env"
         if s.sec_user_agent_email:
             sec = news_mod.SecClient(s.sec_user_agent_email)
-            self._spawn(news_mod.edgar_loop(sec, self.f_edgar, self._on_item, s.edgar_poll_seconds))
+            self._spawn(news_mod.edgar_loop(sec, self.f_edgar, self._on_item, s.edgar_poll_seconds,
+                                            followed=lambda: set(self._tracked()),
+                                            seen=lambda nid: bool(self.store.query("SELECT 1 FROM news WHERE id=?", (nid,)))))
             if self.llm.configured:
                 self._spawn(self._graph_loop(sec))
         else:
@@ -265,6 +269,18 @@ class Services:
                 await asyncio.wait_for(self._kick.wait(), 7200 if self.f_ca.state == "live" else 120)
             except asyncio.TimeoutError:
                 pass
+
+    async def _screener_loop(self) -> None:
+        """Whole-market movers and most traded stocks, every 5 minutes while the market is open."""
+        while True:
+            try:
+                if self.market.is_open(now_utc()) and self.market.assets:
+                    self.market.set_movers(await self.rest.screener(), now_utc())
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("screener_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
+            await asyncio.sleep(300)
 
     async def _history_loop(self) -> None:
         """Adjusted daily closes (completed days only) so the agents can see each stock's recent past."""

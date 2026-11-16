@@ -4,7 +4,7 @@ from decimal import Decimal as D
 
 from tradelab.crosscheck import deviation_bps
 from tradelab.graph import CompanyGraph, business_section, clean_filing
-from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gkg, parse_rss
+from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gkg, parse_rss, pick_filing_document, filing_text
 from tradelab.llm import cost_usd, extract_json, LLMError
 from tradelab.metrics import binomial_p, max_drawdown, sharpe, t_test_p, weekly_report
 from tradelab.storage.market_store import MarketStore
@@ -156,3 +156,14 @@ def test_macro_keyword_filter_keeps_market_news_and_drops_noise():
     keep = ["Oil prices fall as markets weigh supply", "Fed signals rate cut in December", "New tariffs on chips", "ECB holds interest rates"]
     drop = ["Best sparkling wine under 20", "Local pension rules explained", "Football club appoints manager"]
     assert all(MACRO_WORDS.search(h) for h in keep) and not any(MACRO_WORDS.search(h) for h in drop)
+
+
+def test_filing_document_choice_and_text_and_article_content():
+    idx = {"directory": {"item": [{"name": "0001-index.htm"}, {"name": "aapl-8k.htm"}, {"name": "aapl-ex991.htm"}, {"name": "R1.xml"}]}}
+    assert pick_filing_document(idx) == "aapl-ex991.htm"                     # the press release when there is one
+    assert pick_filing_document({"directory": {"item": [{"name": "main8k.htm"}, {"name": "x.jpg"}]}}) == "main8k.htm"
+    assert pick_filing_document({}) is None
+    t = filing_text("<html><style>p{}</style><p>Revenue &amp; profit rose.</p><script>x()</script></html>" + "<p>more</p>" * 5000, limit=40)
+    assert t["text"] == "Revenue & profit rose. more more more mo" and t["text_chars_total"] > 20000
+    n = from_alpaca({"T": "n", "id": 9, "headline": "h", "content": "<p>Shares are <b>down</b> 8%.</p>", "symbols": ["X"]}, T)
+    assert n["extra"]["text"] == "Shares are down 8%."

@@ -33,6 +33,7 @@ class MarketState:
         self.etf_overrides = {"SPY", "QQQ"}
         self.daily: dict[str, list[float]] = {}        # adjusted daily closes, oldest first (completed days only)
         self.daily_received_at: datetime | None = None
+        self.movers: dict[str, Any] = {}               # filtered screener snapshot, with its receive time
 
     # ---- calendar
     def set_calendar(self, rows: list[dict[str, str]], fetched_at: datetime) -> None:
@@ -137,8 +138,25 @@ class MarketState:
         mean = sum(daily) / len(daily)
         vol = (sum((x - mean) ** 2 for x in daily) / (len(daily) - 1)) ** 0.5 * 252 ** 0.5
         high = max(c[-252:])
-        return {"last_close": round(c[-1], 2), "pct_5d": ret(5), "pct_20d": ret(20), "pct_60d": ret(60),
-                "pct_from_1y_high": round((c[-1] / high - 1) * 100, 2), "volatility_pct_yearly": round(vol * 100, 1)}
+        out = {"last_close": round(c[-1], 2), "pct_5d": ret(5), "pct_20d": ret(20), "pct_60d": ret(60),
+               "pct_from_1y_high": round((c[-1] / high - 1) * 100, 2), "volatility_pct_yearly": round(vol * 100, 1)}
+        spy = self.daily.get("SPY")
+        if symbol != "SPY" and spy and len(spy) > 60:          # how it did against the index we are judged on
+            for n in (20, 60):
+                if out[f"pct_{n}d"] is not None and spy[-1 - n] > 0:
+                    out[f"vs_spy_{n}d"] = round(out[f"pct_{n}d"] - (spy[-1] / spy[-1 - n] - 1) * 100, 2)
+        return out
+
+    def set_movers(self, raw: dict[str, Any], received_at: datetime) -> None:
+        """Keep only real, tradable common stocks and funds priced at 5 dollars or more (no warrants, no pennies)."""
+        def ok(sym: str) -> bool:
+            return sym.isalpha() and len(sym) <= 5 and self.tradable(sym) is None
+        pick = lambda rows: [{"ticker": r["symbol"], "today_pct": round(float(r["percent_change"]), 1), "price": float(r["price"])}
+                             for r in rows if ok(r["symbol"]) and float(r.get("price") or 0) >= 5
+                             and abs(float(r["percent_change"])) <= 100][:8]     # beyond that it is a listing artefact
+        self.movers = {"gainers": pick(raw.get("gainers", [])), "losers": pick(raw.get("losers", [])),
+                       "most_traded": [r["symbol"] for r in raw.get("most_active", []) if ok(r["symbol"])][:15],
+                       "received_at_utc": received_at.isoformat()}
 
     def session_return(self, symbol: str, now: datetime, min_bars: int = 30) -> Decimal | None:
         """Return since today's first received bar, using only bars already received."""

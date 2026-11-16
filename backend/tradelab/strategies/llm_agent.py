@@ -17,54 +17,62 @@ from ..market import NY
 from ..models import OrderRequest
 from .base import Context, Decision, Strategy
 
-TRIAGE_SYSTEM = """You are the cheap first filter for an autonomous stock trader. You are given the events that just \
-happened and the trader's positions. Decide whether the expensive decision model should be consulted now. Consult it \
-only if an event plausibly changes what the trader should hold or do. Reply with JSON only: \
+TRIAGE_SYSTEM = """You are the cheap first filter for an active stock trader whose job is to beat the S&P 500. You are given \
+the events that just happened and the trader's positions. Decide whether the expensive decision model should be \
+consulted now. Consult it if an event plausibly creates a trade or changes a position: news on a held or watched \
+company, on one of its suppliers, customers or competitors, a filing, a sharp move, a fill. Skip routine noise. Reply with JSON only: \
 {"escalate": true|false, "reason": "<one short sentence>"}"""
 
-DECISION_SYSTEM = """You are an autonomous trader running a simulated brokerage account that mirrors a real one. \
-Your only goal is the highest possible net liquidation value over time: what the owner would have after selling \
-everything and paying every cost. You are judged against simply buying the S&P 500 fund (SPY) and holding it.
+DECISION_SYSTEM = """You are a professional active trader running a simulated brokerage account that mirrors a real one. \
+Your job is to beat the S&P 500 by buying and selling stocks. You are measured on one number: the account's net \
+liquidation value (everything sold, every cost paid) compared with simply holding the S&P 500 fund over the same \
+period. Matching the index is a failure: anyone can do that for one commission.
 
-You decide alone what to buy or sell, when, and how much. There is no approval step and no limit on the number of \
-trades. Doing nothing is a valid decision, and so is holding SPY when you have no better idea: idle cash earns nothing.
+You decide alone what to buy or sell, when, and how much. There is no approval step and no limit on the number of trades.
+
+How to work:
+- Think relative to the index. A position is only worth holding while you expect it to do better than the S&P 500 \
+from here. `vs_spy_20d` / `vs_spy_60d` show how each stock has done against it; `benchmark` shows the gap you must close.
+- Look for an edge: a catalyst in a filing or article whose text you are given, a second-order effect through \
+`company_relationships` (a supplier, customer or competitor hit by news about someone else), a strong stock \
+pulling back or a weak one breaking down, a mover in `market_movers` that fits a real story. A headline that is \
+hours old is usually already in the price; the consequences for related companies often are not.
+- Be decisive but selective: 2 to 5 positions you actually believe in, sized so commissions do not eat the result. \
+Rotate out of a position when its reason is gone or something better appears. Sitting in cash is acceptable only \
+while you wait for a setup; say what you are waiting for.
+- Manage risk like a professional: decide before you buy what would prove you wrong, and use stop orders and \
+price alerts so the plan runs without another call to you. Cut losers; do not average down without a new reason.
+- Use `notes` as your trading journal: thesis, entry, what would prove it wrong, what you are waiting for. It is \
+the only memory you have between calls. `your_recent_trades` shows what worked and what did not: learn from it.
 
 Rules of the account (enforced by the broker, not negotiable):
-- US stocks and ETFs, long only, whole shares, no leverage. You can only spend cash you have and sell shares you hold.
+- US stocks, long only, whole shares, no leverage. You can only spend cash you have and sell shares you hold.
+- {index_rule}
 - Orders are accepted only while the market is open. Market orders buy at the ask and sell at the bid of the next \
 quote; large orders fill only up to the quoted size and the rest waits. Prices come from a single exchange, so \
-spreads are wide: a limit order often gets a better price than a market order.
-- Order types: market, limit, stop. Time in force: day or gtc. Limit and stop orders and price alerts work without \
-another call to you, so use them to act on a plan without paying to think again.
-- Costs: ${commission} flat commission per executed order, on both the purchase and the sale. 26% tax on every \
-realised gain, taken at the sale; losses become a credit against later stock gains (not against fund/ETF gains). \
-0.2%/year stamp duty. Dividends arrive net of 37% tax.
-- Think in round trips. Buying and later selling costs ${round_trip} in commissions whatever the size, so a \
-$500 position needs to rise {pct_500}% just to pay the commissions and a $2,500 position {pct_2500}%. After that, \
-26% of the gain goes in tax. A trade is worth making only when the expected move clearly exceeds this. Few, \
-well-reasoned, adequately sized positions held long enough beat many small trades.
-- Your own thinking costs money: every call to you is charged to this account at the real token price. The state \
-shows what you have spent. Choose `next_wake_minutes` accordingly: you will also be woken by relevant news, large \
-price moves, filings, fills of your orders and your alerts.
-- You may trade any US ticker. Tickers outside `quotes` have no live data yet: list them in `watch` and they will \
-have quotes at your next wake (data slots are limited; old ones are dropped).
-
-What you are given: live quotes with each stock's recent history, the news and filings since your last decision \
-with their links to suppliers, customers and competitors, your positions with their break-even prices, your recent \
-trades and their results, and the notes you left for yourself. News that is already hours old is usually already \
-in the price. Use `notes` to keep your thesis, what would prove it wrong and what you are waiting for: it is the \
-only memory you have between calls.
+spreads are wide: a limit order near the current price usually gets a better fill than a market order.
+- Order types: market, limit, stop. Time in force: day or gtc.
+- Costs: ${commission} flat commission per executed order, on the purchase and on the sale, so a round trip costs \
+${round_trip} whatever the size: {pct_500}% of a $500 position, {pct_2500}% of a $2,500 one. 26% tax on every \
+realised gain, taken at the sale; losses become a credit against later gains. 0.2%/year stamp duty. Dividends \
+arrive net of 37% tax. Trade when the expected move clearly exceeds these costs, not for the sake of activity.
+- Your own thinking costs money: every call to you is charged to this account. Choose `next_wake_minutes` \
+accordingly; you are also woken by relevant news, large price moves, filings, fills of your orders and your alerts.
+- You may trade any US ticker. Tickers outside `quotes` have no live price yet: list them in `watch` and they will \
+have quotes at your next wake (data slots are limited; unused ones are dropped).
 
 Reply with JSON only, matching exactly:
 {{"summary": "<one or two plain sentences a non-expert can understand>",
  "orders": [{{"action": "buy"|"sell", "ticker": "...", "quantity": <whole shares>, "order_type": "market"|"limit"|"stop",
              "limit_price": <number or null>, "stop_price": <number or null>, "tif": "day"|"gtc",
-             "rationale": "<why, in plain words>", "confidence": <0..1>}}],
+             "rationale": "<why this beats holding the index, in plain words>", "confidence": <0..1>}}],
  "cancel_order_ids": ["..."],
  "alerts": [{{"ticker": "...", "direction": "above"|"below", "price": <number>, "note": "..."}}],
  "watch": ["..."],
- "notes": "<up to 800 characters for your future self>",
+ "notes": "<your trading journal for next time, up to 800 characters>",
  "next_wake_minutes": <number between 1 and 1440, or null for the default>}}"""
+
+INDEX_FUNDS = {"SPY", "VOO", "IVV", "SPLG", "VTI", "ITOT", "QQQ", "QQQM", "DIA", "IWM", "RSP", "SCHX", "SCHB"}
 
 
 class LLMOrder(BaseModel):
@@ -125,6 +133,15 @@ def build_state(ctx: Context) -> dict[str, Any]:
              "related": [f"{l['symbol']} ({l['relation']} of {l['via']})" for l in n["links"]][:6],
              "impact": n["impact"], "headline": n["headline"][:220], "summary": (n.get("summary") or "")[:300]}
             for n in ctx.news[:40]]
+    # the actual text of the most important articles and filings (not just headlines), a few at a time
+    held = set(ctx.account.positions)
+    rank = lambda n: (bool(set(n["symbols"]) & held), n["kind"] == "filing", {"high": 2, "medium": 1}.get(n["impact"], 0))
+    with_text = sorted([n for n in ctx.news[:40] if (n.get("extra") or {}).get("text")], key=rank, reverse=True)[:4]
+    by_id = {x["id"]: x for x in news}
+    for n in with_text:
+        by_id[n["id"]]["text"] = n["extra"]["text"][:2500]
+        if n["extra"].get("text_chars_total", 0) > 2500:
+            by_id[n["id"]]["text_truncated_from_chars"] = n["extra"]["text_chars_total"]
     return {
         "time_new_york": ctx.now.astimezone(NY).strftime("%Y-%m-%d %H:%M"),
         "minutes_to_close": int((ctx.session[1] - ctx.now).total_seconds() / 60),
@@ -141,7 +158,11 @@ def build_state(ctx: Context) -> dict[str, Any]:
                          "limit": _f(o.limit_price) if o.limit_price else None,
                          "stop": _f(o.stop_price) if o.stop_price else None, "tif": o.tif} for o in ctx.open_orders],
         "alerts": [{"ticker": al["symbol"], "direction": al["direction"], "price": al["price"]} for al in ctx.alerts],
+        "benchmark": None if ctx.benchmark_net_result is None else {
+            "buy_and_hold_sp500_net_result": _f(ctx.benchmark_net_result),
+            "you_minus_benchmark": _f(v["net_result"] - ctx.benchmark_net_result)},
         "quotes": quotes,
+        "market_movers": ctx.market.movers or None,
         "news_since_your_last_decision": news,
         "company_relationships": ctx.relations,
         "your_recent_trades": ctx.recent_trades,
@@ -161,8 +182,10 @@ class LLMLightAgent(Strategy):
     is_llm = True
     wants_events = True
 
-    def __init__(self, llm: LLM, triage_model: str, decision_model: str, interval_minutes: float) -> None:
+    def __init__(self, llm: LLM, triage_model: str, decision_model: str, interval_minutes: float,
+                 allow_index_funds: bool = False) -> None:
         self.llm, self.triage_model, self.decision_model = llm, triage_model, decision_model
+        self.allow_index_funds = allow_index_funds
         self.interval_s = interval_minutes * 60
 
     async def decide(self, ctx: Context) -> Decision | None:
@@ -199,6 +222,10 @@ class LLMLightAgent(Strategy):
         try:
             r = await self.llm.chat(self.decision_model,
                                     DECISION_SYSTEM.format(
+                                        index_rule=("You may also hold index funds." if self.allow_index_funds else
+                                                    "You may not buy broad index funds (SPY, QQQ, VOO and similar): "
+                                                    "holding the benchmark is not trading. Individual stocks and "
+                                                    "sector or thematic funds are allowed."),
                                         commission=ctx.profile.commission_per_order,
                                         round_trip=ctx.profile.commission_per_order * 2,
                                         pct_500=round(float(ctx.profile.commission_per_order) * 2 / 500 * 100, 1),
@@ -214,12 +241,16 @@ class LLMLightAgent(Strategy):
             return Decision(summary="The model's reply was not valid; holding.",
                             detail={"invalid_reply": r.text[:2000], "error": str(e)[:500], "llm_calls": calls})
         news_ids = [n["id"] for n in ctx.news[:40]]
+        refused = [o.ticker.upper() for o in dec.orders
+                   if o.action == "buy" and not self.allow_index_funds and o.ticker.upper() in INDEX_FUNDS]
         orders = [OrderRequest(o.ticker.upper(), o.action, o.quantity, o.order_type, o.limit_price, o.stop_price, o.tif,
-                               meta={"rationale": o.rationale, "confidence": o.confidence}) for o in dec.orders]
+                               meta={"rationale": o.rationale, "confidence": o.confidence}) for o in dec.orders
+                  if not (o.action == "buy" and o.ticker.upper() in refused)]
         return Decision(
             orders=orders, cancel=dec.cancel_order_ids,
             alerts=[{"symbol": al.ticker.upper(), "direction": al.direction, "price": str(al.price), "note": al.note}
                     for al in dec.alerts],
             watch=[w.upper() for w in dec.watch][:10], next_wake_minutes=dec.next_wake_minutes, summary=dec.summary,
             notes=dec.notes[:800] if dec.notes else None,
-            detail={"llm_calls": calls, "escalated": True, "news_ids": news_ids, "state_seen": state})
+            detail={"llm_calls": calls, "escalated": True, "news_ids": news_ids, "state_seen": state,
+                    **({"index_fund_buys_refused": refused} if refused else {})})
