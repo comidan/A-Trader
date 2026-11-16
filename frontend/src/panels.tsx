@@ -68,6 +68,7 @@ function ActivityBody({ a }: { a: Activity }) {
         {a.rationale && <div><span className="muted">Why:</span> {a.rationale}</div>}
         {a.summary && a.summary !== a.rationale && a.confidence != null && <div><span className="muted">Its plan:</span> {a.summary}</div>}
         {a.by_risk_manager && <div className="muted">Placed automatically by the safety settings.</div>}
+        {a.by_exit_plan && <div className="muted">Sold automatically by the exit plan the trader had set. No thinking cost.</div>}
         {a.news?.map((n) => (
           <div key={n.id}><span className="muted">News it had seen:</span> {n.url ? <a href={n.url} target="_blank" rel="noreferrer">{n.headline}</a> : n.headline} <span className="muted">({n.source})</span></div>
         ))}
@@ -114,13 +115,15 @@ export function Holdings({ strategies, refresh }: { strategies: StrategyRow[]; r
       {!d ? <p className="muted">Loading…</p> : d.positions.length === 0 ? <p className="muted">Holding only cash right now.</p> : (
         <table>
           <thead><tr><th>Stock</th><th className="num">Shares</th><th className="num">Paid (avg)</th><th className="num">Sell price now</th>
-            <th className="num">Value</th><th className="num">Gain / loss</th><th>Price from</th></tr></thead>
+            <th className="num">Last real trade</th><th className="num">Value</th><th className="num">Gain / loss</th><th>Automatic exit</th><th>Price from</th></tr></thead>
           <tbody>{d.positions.map((p) => (
             <tr key={p.symbol}>
               <td><b>{p.symbol}</b> <span className="muted">{p.name}</span>{p.halted && <span className="pill paused">halted</span>}</td>
               <td className="num">{p.qty}</td><td className="num">{usd(p.avg_cost)}</td>
-              <td className="num">{p.bid != null ? usd(p.bid) : "—"}</td><td className="num">{p.value != null ? usd(p.value) : "—"}</td>
+              <td className="num">{p.bid != null ? usd(p.bid) : "—"}{p.spread_pct != null && p.spread_pct > 1 && <span className="warn-text small" title="The quote is unusually wide; the real market price is closer to the last trade."> wide {p.spread_pct.toFixed(1)}%</span>}</td>
+              <td className="num">{p.last_trade != null ? usd(p.last_trade) : "—"}</td><td className="num">{p.value != null ? usd(p.value) : "—"}</td>
               <td className="num">{p.unrealized != null ? <Money v={p.unrealized} /> : "—"}</td>
+              <td className="small">{d.exit_plans[p.symbol] ? <>{d.exit_plans[p.symbol].take_profit && <>take profit at {usd(Number(d.exit_plans[p.symbol].take_profit))}</>}{d.exit_plans[p.symbol].take_profit && d.exit_plans[p.symbol].stop_loss && " · "}{d.exit_plans[p.symbol].stop_loss && <>stop at {usd(Number(d.exit_plans[p.symbol].stop_loss))}</>}</> : <span className="muted">none</span>}</td>
               <td className="muted small"><Dot tone={p.price_is_fresh ? "ok" : "warn"} />{p.price_source ?? "no price"} · {ago(p.price_received_at_utc)}</td>
             </tr>))}</tbody>
         </table>

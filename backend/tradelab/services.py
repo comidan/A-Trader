@@ -381,6 +381,7 @@ class Services:
                     "deposits": float(a.deposits), "dividends": float(a.dividends), "positions": len(a.positions), "open_orders": len(e.state.open_orders(sid)),
                     "costs": {"commissions": float(a.commissions), "taxes": float(a.taxes), "tokens": float(a.token_cost),
                               "stamp_duty": float(a.stamp_duty), "exit_costs_if_sold_now": float(v["exit_costs"])},
+                    "quote_gap": float(v["quote_gap"]),
                     "prices_stale_for": stale if not e.market.is_open(now) else [], "prices_missing_for": v["unpriced"],
                     "suspended_positions": stale if e.market.is_open(now) else [],
                     **strategy_metrics(a, v, pts, starting)})
@@ -433,10 +434,13 @@ class Services:
                 "bid": float(q.bid) if q else None, "value": float(pos.qty * q.bid) if q else None,
                 "unrealized": float(pos.qty * q.bid - pos.basis) if q else None,
                 "price_source": q.source if q else None, "price_received_at_utc": iso(q.recv_ts) if q else None,
+                "last_trade": float(lt) if (lt := e.market.last_trade(sym)) is not None else None,
+                "spread_pct": float((q.ask - q.bid) / ((q.ask + q.bid) / 2) * 100) if q and q.valid() else None,
                 "price_is_fresh": bool(q and e.market.fresh_quote(sym, now)), "halted": e.market.is_halted(sym)})
         return {"id": sid, "positions": positions,
                 "open_orders": [o.to_dict() for o in e.state.open_orders(sid)],
                 "alerts": [al for al in e.state.alerts.values() if al["strategy_id"] == sid],
+                "exit_plans": {p["symbol"]: p for p in e.state.exit_plans.values() if p["strategy_id"] == sid},
                 "tax_loss_credit": float(a.loss_credit(e.market.tax_year(now)))}
 
     def activity(self, limit: int = 60, sid: str | None = None) -> list[dict[str, Any]]:
@@ -461,7 +465,7 @@ class Services:
                            rationale=meta.get("rationale"), summary=meta.get("summary"), confidence=meta.get("confidence"),
                            wakes=meta.get("wakes", []), news_ids=meta.get("news_ids", [])[:5],
                            quote={"bid": p["quote"]["bid"], "ask": p["quote"]["ask"], "source": p["quote"]["source"],
-                                  "recv_ts": p["quote"]["recv_ts"]}, by_risk_manager=meta.get("source") == "risk_manager")
+                                  "recv_ts": p["quote"]["recv_ts"]}, by_risk_manager=meta.get("source") == "risk_manager", by_exit_plan=meta.get("source") == "exit_plan")
                 news_ids |= set(row["news_ids"])
             elif en.kind == "decision":
                 if not p.get("summary") and not p.get("orders"):

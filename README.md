@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 109 tests
+cd backend && pip install -e '.[dev]' && pytest          # 116 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -118,6 +118,11 @@ benchmark is not trading. At each decision it receives:
   the followed tickers and ask for any of them;
 - its positions with break-even prices, its recent trades with after-tax results, and its own
   trading journal (its only memory, stored in the ledger).
+
+It is called on a clock (every 15 minutes by default) to scan prices, and by events in between.
+Every purchase can carry a take-profit and a stop: the engine then sells the instant either level is
+reached, with no model call. Take-profits trigger on the quoted bid; stops trigger on a real traded
+price, never on a quote that merely widened.
 
 None of this guarantees it beats buy & hold: commissions, tax and the pessimistic free price feed
 all weigh on an active trader. That is what the experiment measures.

@@ -97,6 +97,7 @@ class SimState:
     settings: dict[str, Any] = field(default_factory=dict)
     applied_actions: set[str] = field(default_factory=set)       # "<strategy>:<corporate action id>"
     blocked: dict[str, str] = field(default_factory=dict)        # symbol -> why new purchases are refused
+    exit_plans: dict[str, dict[str, Any]] = field(default_factory=dict)   # "<strategy>:<symbol>" -> take-profit / stop
 
     def open_orders(self, strategy_id: str | None = None, symbol: str | None = None) -> list[Order]:
         return [o for o in self.orders.values()
@@ -155,6 +156,10 @@ def apply_event(state: SimState, kind: str, strategy_id: str | None, p: dict[str
         state.blocked[p["symbol"]] = p["reason"]
     elif kind == "symbol_unblocked":
         state.blocked.pop(p["symbol"], None)
+    elif kind == "exit_plan_set":
+        state.exit_plans[f"{strategy_id}:{p['symbol']}"] = {**p, "strategy_id": strategy_id}
+    elif kind == "exit_plan_cleared":
+        state.exit_plans.pop(f"{strategy_id}:{p['symbol']}", None)
     elif kind == "kill_switch":
         state.kill_switch = bool(p["on"])
     elif kind == "settings_changed":
@@ -189,6 +194,7 @@ def _apply_fill(state: SimState, a: Account, p: dict[str, Any]) -> None:
             a.losses.append([d(p["loss_created"]), int(p["loss_expiry"])])
         if pos.qty == 0:
             del a.positions[sym]
+            state.exit_plans.pop(f"{a.strategy_id}:{sym}", None)        # nothing left to exit
     o = state.orders.get(p["order_id"])
     if o:
         o.filled_qty += qty

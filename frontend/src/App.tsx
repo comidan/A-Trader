@@ -37,6 +37,8 @@ function Card({ s, rank }: { s: StrategyRow; rank: number }) {
         <div className="muted small">
           Before costs {signed(s.gross_result)} · costs so far {usd(totalCosts)}
           {s.id !== "buy_hold" && s.vs_buy_hold_pct != null && <><br />vs buy & hold {pct(s.vs_buy_hold_pct)}</>}
+          {s.quote_gap >= 1 && <><br /><span className="warn-text" title="Holdings are valued at the quoted sell price. On the single-exchange feed that quote can sit well below the last real trade; this is that difference, not a trading loss.">
+            {usd(s.quote_gap)} of this is the wide-quote gap, not a trading loss</span></>}
           {(s.suspended_positions.length > 0 || s.prices_missing_for.length > 0) && <><br /><span className="warn-text">No fresh price for {[...s.suspended_positions, ...s.prices_missing_for].join(", ")}</span></>}
         </div>
       </div>

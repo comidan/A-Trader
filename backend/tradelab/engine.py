@@ -31,6 +31,9 @@ DEFAULT_SETTINGS = {"max_position_pct": None, "max_daily_loss_pct": None, "stop_
                     "daily_token_budget_usd": None, "extra_latency_ms": 0, "slippage_bps": 0}
 MOVE_WINDOW = timedelta(minutes=5)
 MOVE_THRESHOLD = Decimal("0.015")
+MOVE_COOLDOWN = timedelta(minutes=10)
+TIGHT_SPREAD = Decimal("0.004")          # a quote wider than 0.4% says nothing reliable about the price
+PRICE_WAKE_MIN_GAP = timedelta(minutes=3)
 
 
 class Runner:
@@ -62,6 +65,9 @@ class Runner:
                 self.next_wake_s = None
             if not self.engine.running or not self.engine.market.is_open(self.engine.clock()):
                 continue
+            if ({w["reason"] for w in wakes} == {"price_move"} and self.last_decision_at
+                    and self.engine.clock() - self.last_decision_at < PRICE_WAKE_MIN_GAP):
+                continue                              # it just looked: a price wobble does not justify paying again
             self.busy = True
             try:
                 await self.engine.step(self, wakes)
@@ -78,7 +84,7 @@ class Engine:
                  clock: Callable[[], datetime] = now_utc, autostart: bool = True) -> None:
         self.settings, self.ledger, self.sims, self.bus = settings, ledger, sims, bus
         self.market, self.store, self.clock, self.factory = market, store, clock, strategy_factory
-        self.profile = BrokerProfile()
+        self.profile = BrokerProfile(name=settings.broker_name, commission_per_order=settings.broker_commission_usd)
         self.autostart = autostart
         self.universe = Universe(settings.core_list, settings.capacity)
         self.sim: dict[str, Any] | None = None
@@ -95,6 +101,7 @@ class Engine:
         self._was_open = False
         self._last_snapshot: datetime | None = None
         self._suspended: set[str] = set()
+        self._move_fired: dict[str, datetime] = {}
         self._explained: dict[str, str] = {}          # symbol -> day a split explained its price jump
         self.on_market_open: Callable[[], None] | None = None
         self.relations: Callable[[str], dict[str, Any] | None] | None = None
@@ -216,7 +223,12 @@ class Engine:
     def value(self, sid: str) -> dict[str, Any]:
         a = self.state.accounts[sid]
         bids = {s: b for s in a.positions if (b := self.market.last_bid(s)) is not None}
-        return valuation(a, bids, self.market.is_etf, self.market.tax_year(self.clock()), self.profile)
+        v = valuation(a, bids, self.market.is_etf, self.market.tax_year(self.clock()), self.profile)
+        # How much of the result is only the gap between the quoted sell price and the last real trade
+        # (large on the single-exchange feed). Information only: the headline stays at the quoted sell price.
+        v["quote_gap"] = sum((pos.qty * (lt - bids[s]) for s, pos in a.positions.items()
+                              if s in bids and (lt := self.market.last_trade(s)) is not None and lt > bids[s]), D(0))
+        return v
 
     def snapshot_equity(self, now: datetime) -> None:
         if not self.sim:
@@ -238,6 +250,7 @@ class Engine:
         if not self.running or self.broker is None:
             return
         self.broker.on_quote(q)
+        self._check_take_profit(q)
         self._check_alerts(q)
         self._check_stop_loss(q)
         self._check_move(q)
@@ -252,7 +265,11 @@ class Engine:
                                                                          "price": al["price"], "note": al.get("note", "")})
 
     def _check_move(self, q: Quote) -> None:
+        """Wake the agents on a real sharp move. Wide quotes are ignored: on a single exchange the quote often
+        widens by several percent with no trade at all, and that is not a price move."""
         mid = (q.bid + q.ask) / 2
+        if (q.ask - q.bid) / mid > TIGHT_SPREAD:
+            return
         ref = self._move_ref.get(q.symbol)
         if ref is None or q.recv_ts - ref[1] > MOVE_WINDOW:
             self._move_ref[q.symbol] = (mid, q.recv_ts)
@@ -260,13 +277,40 @@ class Engine:
         change = mid / ref[0] - 1
         if abs(change) >= MOVE_THRESHOLD:
             self._move_ref[q.symbol] = (mid, q.recv_ts)
+            last = self._move_fired.get(q.symbol)
+            if last and q.recv_ts - last < MOVE_COOLDOWN:
+                return
+            self._move_fired[q.symbol] = q.recv_ts
             for r in self.runners.values():
                 if r.strategy.wants_events:
                     r.wake("price_move", {"ticker": q.symbol, "move_pct": round(float(change) * 100, 2), "within_minutes": 5})
 
+    # ------------------------------------------------------------------ exit plans (take-profit / stop without the model)
+    def _exit(self, plan: dict[str, Any], now: datetime, why: str, limit: Decimal | None) -> None:
+        sid, sym = plan["strategy_id"], plan["symbol"]
+        qty = self.broker.sellable(sid, sym)
+        self.emit("exit_plan_cleared", {"symbol": sym, "reason": why}, sid)
+        if qty > 0:
+            req = OrderRequest(sym, "sell", qty, "limit" if limit else "market", limit_price=limit,
+                               meta={"rationale": why, "source": "exit_plan"})
+            self.broker.submit(sid, req, now)
+
+    def _check_take_profit(self, q: Quote) -> None:
+        for plan in [p for p in self.state.exit_plans.values() if p["symbol"] == q.symbol and p.get("take_profit")]:
+            if q.bid >= D(plan["take_profit"]) and self.state.accounts[plan["strategy_id"]].qty(q.symbol) > 0:
+                self._exit(plan, q.recv_ts, f"Take-profit reached at {plan['take_profit']}: selling as planned.", D(plan["take_profit"]))
+
+    def _check_stop(self, symbol: str, last_trade: Decimal, now: datetime) -> None:
+        """Stops trigger on a real traded price (1-minute bar), never on a quote that merely widened."""
+        for plan in [p for p in self.state.exit_plans.values() if p["symbol"] == symbol and p.get("stop_loss")]:
+            if last_trade <= D(plan["stop_loss"]) and self.state.accounts[plan["strategy_id"]].qty(symbol) > 0:
+                self._exit(plan, now, f"Stop reached: traded at {last_trade}, at or below the stop {plan['stop_loss']}.", None)
+
     def on_bar(self, symbol: str, bar: dict[str, Any], source: str) -> None:
         self.market.on_bar(symbol, bar)
         self.store.add_bar(symbol, bar, source)
+        if self.running and self.broker and self.market.is_open(bar["recv_ts"]):
+            self._check_stop(symbol, bar["c"], bar["recv_ts"])
 
     def on_status(self, symbol: str, code: str, message: str, reason: str, recv_ts: datetime) -> None:
         change = self.market.on_status(symbol, code, message, reason, recv_ts)
@@ -377,7 +421,8 @@ class Engine:
     # ------------------------------------------------------------------ universe
     def sync_universe(self) -> None:
         before = set(self.universe.symbols())
-        pinned = {o.symbol for o in self.state.orders.values()} | {a["symbol"] for a in self.state.alerts.values()}
+        pinned = ({o.symbol for o in self.state.orders.values()} | {a["symbol"] for a in self.state.alerts.values()}
+                  | {p["symbol"] for p in self.state.exit_plans.values()})
         for a in self.state.accounts.values():
             pinned |= set(a.positions)
         self.universe.pin(pinned)
@@ -435,7 +480,8 @@ class Engine:
                        [a for a in self.state.alerts.values() if a["strategy_id"] == sid], news, self.profile,
                        self.market.session(now), runner.last_decision_at, D(self.sim["starting_capital_usd"]),
                        charge, budget_left, runner.notes, trades, relations,
-                       self.value("buy_hold")["net_result"] if "buy_hold" in self.state.accounts else None)
+                       self.value("buy_hold")["net_result"] if "buy_hold" in self.state.accounts else None,
+                       [p for p in self.state.exit_plans.values() if p["strategy_id"] == sid])
 
     async def step(self, runner: Runner, wakes: list[dict[str, Any]]) -> Decision | None:
         started = self.clock()
@@ -457,7 +503,7 @@ class Engine:
                         "limit_price": str(o.limit_price) if o.limit_price else None,
                         "stop_price": str(o.stop_price) if o.stop_price else None, "tif": o.tif, **o.meta}
                        for o in decision.orders],
-            "cancel": decision.cancel, "alerts": decision.alerts, "watch": decision.watch,
+            "cancel": decision.cancel, "alerts": decision.alerts, "watch": decision.watch, "exit_plans": decision.exit_plans,
             "next_wake_minutes": decision.next_wake_minutes, "notes": decision.notes,
             "quotes_seen": {s: q for s, q in seen.items() if s in relevant}, "detail": decision.detail,
         }, sid)
@@ -477,6 +523,10 @@ class Engine:
             req.meta = {**req.meta, "decision_id": decision_id, "summary": decision.summary, "news_ids": news_ids,
                         "wakes": [w["reason"] for w in wakes]}
             self.broker.submit(sid, req, ready)
+        for plan in decision.exit_plans:
+            if self.market.tradable(plan["symbol"]) is None and (plan.get("take_profit") or plan.get("stop_loss")):
+                self.emit("exit_plan_set", {"symbol": plan["symbol"], "take_profit": plan.get("take_profit"),
+                                            "stop_loss": plan.get("stop_loss")}, sid)
         for al in decision.alerts:
             if self.market.tradable(al["symbol"]) is None:
                 self.emit("alert_set", {"id": uuid.uuid4().hex, **al}, sid)

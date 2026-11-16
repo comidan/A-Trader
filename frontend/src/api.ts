@@ -21,6 +21,7 @@ export interface StrategyRow {
   net_result: number; gross_result: number; net_liquidation: number; equity: number; cash: number; deposits: number; dividends: number;
   positions: number; open_orders: number;
   costs: { commissions: number; taxes: number; tokens: number; stamp_duty: number; exit_costs_if_sold_now: number };
+  quote_gap: number;
   prices_stale_for: string[]; prices_missing_for: string[]; suspended_positions: string[];
   return_pct: number; gross_return_pct: number; max_drawdown_pct: number; sharpe: number | null; trading_days: number;
   win_rate_pct: number | null; closed_trades: number; orders: number; fills: number; turnover: number;
@@ -37,7 +38,7 @@ export interface Activity {
   symbol?: string; side?: string; qty?: number; price?: number; commission?: number; tax?: number;
   realized_gain?: number | null; rationale?: string; summary?: string; confidence?: number; wakes?: string[];
   news?: { id: string; headline: string; source: string; url: string; recv_ts: string }[];
-  quote?: { bid: string; ask: string; source: string; recv_ts: string }; by_risk_manager?: boolean;
+  quote?: { bid: string; ask: string; source: string; recv_ts: string }; by_risk_manager?: boolean; by_exit_plan?: boolean;
   orders?: number; thinking_ms?: number; token_cost?: number; models?: string[]; error?: string;
   reason?: string; unfilled_qty?: number; amount?: number; detail?: Record<string, unknown>;
 }
@@ -48,10 +49,10 @@ export interface NewsItem {
 }
 export interface Position {
   symbol: string; name: string; qty: number; avg_cost: number; bid: number | null; value: number | null;
-  unrealized: number | null; price_source: string | null; price_received_at_utc: string | null;
+  unrealized: number | null; last_trade: number | null; spread_pct: number | null; price_source: string | null; price_received_at_utc: string | null;
   price_is_fresh: boolean; halted: boolean;
 }
-export interface Detail { id: string; positions: Position[]; open_orders: Record<string, unknown>[]; alerts: Record<string, unknown>[]; tax_loss_credit: number }
+export interface Detail { id: string; exit_plans: Record<string, { take_profit: string | null; stop_loss: string | null }>; positions: Position[]; open_orders: Record<string, unknown>[]; alerts: Record<string, unknown>[]; tax_loss_credit: number }
 export interface QuoteRow {
   symbol: string; name: string; core: boolean; bid: number | null; ask: number | null; bid_size: number | null;
   ask_size: number | null; source: string | null; received_at_utc: string | null; age_seconds: number | null;

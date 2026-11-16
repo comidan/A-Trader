@@ -34,6 +34,7 @@ class Context:
     recent_trades: list[dict[str, Any]] = field(default_factory=list)
     relations: dict[str, Any] = field(default_factory=dict)   # company graph for held / watched tickers
     benchmark_net_result: Decimal | None = None             # what buy & hold has made so far, same start
+    exit_plans: list[dict[str, Any]] = field(default_factory=list)
 
     def quote(self, symbol: str) -> Quote | None:
         return self.market.fresh_quote(symbol, self.now)
@@ -45,6 +46,7 @@ class Decision:
     cancel: list[str] = field(default_factory=list)
     alerts: list[dict[str, Any]] = field(default_factory=list)      # {symbol, direction: above|below, price, note}
     watch: list[str] = field(default_factory=list)
+    exit_plans: list[dict[str, Any]] = field(default_factory=list)   # {symbol, take_profit, stop_loss}: run without the model
     next_wake_minutes: float | None = None
     summary: str = ""
     notes: str | None = None                 # kept for the next decision

@@ -158,6 +158,29 @@ class MarketState:
                        "most_traded": [r["symbol"] for r in raw.get("most_active", []) if ok(r["symbol"])][:15],
                        "received_at_utc": received_at.isoformat()}
 
+    def last_trade(self, symbol: str) -> Decimal | None:
+        """Close of the most recent 1-minute bar: a price at which shares really changed hands."""
+        bars = self.bars.get(symbol)
+        return bars[-1]["c"] if bars else None
+
+    def intraday(self, symbol: str, now: datetime) -> dict[str, Any] | None:
+        """Price action today from received 1-minute bars: where the stock is and how fast it is moving."""
+        s = self.session(now)
+        today = [b for b in self.bars.get(symbol, ()) if s and b["recv_ts"] >= s[0]]
+        if len(today) < 3:
+            return None
+        last = today[-1]["c"]
+        hi, lo = max(b["h"] for b in today), min(b["l"] for b in today)
+
+        def chg(minutes: int) -> float | None:
+            cutoff = now - timedelta(minutes=minutes)
+            past = [b for b in today if b["recv_ts"] <= cutoff]
+            return round(float(last / past[-1]["c"] - 1) * 100, 2) if past and past[-1]["c"] > 0 else None
+
+        return {"last_trade": float(last), "pct_5m": chg(5), "pct_15m": chg(15), "pct_60m": chg(60),
+                "day_high": float(hi), "day_low": float(lo),
+                "position_in_day_range_pct": round(float((last - lo) / (hi - lo)) * 100) if hi > lo else None}
+
     def session_return(self, symbol: str, now: datetime, min_bars: int = 30) -> Decimal | None:
         """Return since today's first received bar, using only bars already received."""
         s = self.session(now)

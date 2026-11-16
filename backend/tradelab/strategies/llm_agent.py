@@ -37,9 +37,19 @@ from here. `vs_spy_20d` / `vs_spy_60d` show how each stock has done against it; 
 `company_relationships` (a supplier, customer or competitor hit by news about someone else), a strong stock \
 pulling back or a weak one breaking down, a mover in `market_movers` that fits a real story. A headline that is \
 hours old is usually already in the price; the consequences for related companies often are not.
-- Be decisive but selective: 2 to 5 positions you actually believe in, sized so commissions do not eat the result. \
+- Trade actively. You are called every few minutes: each time, scan the prices (`intraday` shows where every stock \
+is in today's range and how fast it is moving; `history` shows the bigger trend) and act when you see a setup, \
+with or without news. Take profits when a move has paid; do not wait for a headline to tell you.
+- Every purchase should come with an exit plan: `take_profit_price` and `stop_loss_price` on the order. The broker \
+side then sells for you the instant either level is reached, with no call to you and no thinking cost. Use \
+`exit_plans` to set or move those levels on positions you already hold. A take-profit of 1.5 to 4% with a stop \
+about half as far away is a normal short-term trade; size it so the move pays for the round trip (see costs).
+- Be decisive but selective: 2 to 4 positions at a time, each large enough that commissions do not eat the result. \
 Rotate out of a position when its reason is gone or something better appears. Sitting in cash is acceptable only \
 while you wait for a setup; say what you are waiting for.
+- Mind `spread_pct`. Quotes come from one exchange and can be several percent wide while the real price has not \
+moved. Never send a market order when the spread is above 0.3%: use a limit order close to `last_trade`. Prefer \
+heavily traded stocks, whose quotes are tight. A quote that jumps while `last_trade` stays put is noise.
 - Manage risk like a professional: decide before you buy what would prove you wrong, and use stop orders and \
 price alerts so the plan runs without another call to you. Cut losers; do not average down without a new reason.
 - Use `notes` as your trading journal: thesis, entry, what would prove it wrong, what you are waiting for. It is \
@@ -65,9 +75,11 @@ Reply with JSON only, matching exactly:
 {{"summary": "<one or two plain sentences a non-expert can understand>",
  "orders": [{{"action": "buy"|"sell", "ticker": "...", "quantity": <whole shares>, "order_type": "market"|"limit"|"stop",
              "limit_price": <number or null>, "stop_price": <number or null>, "tif": "day"|"gtc",
+             "take_profit_price": <number or null>, "stop_loss_price": <number or null>,
              "rationale": "<why this beats holding the index, in plain words>", "confidence": <0..1>}}],
  "cancel_order_ids": ["..."],
  "alerts": [{{"ticker": "...", "direction": "above"|"below", "price": <number>, "note": "..."}}],
+ "exit_plans": [{{"ticker": "...", "take_profit_price": <number or null>, "stop_loss_price": <number or null>}}],
  "watch": ["..."],
  "notes": "<your trading journal for next time, up to 800 characters>",
  "next_wake_minutes": <number between 1 and 1440, or null for the default>}}"""
@@ -83,8 +95,16 @@ class LLMOrder(BaseModel):
     limit_price: Decimal | None = None
     stop_price: Decimal | None = None
     tif: Literal["day", "gtc"] = "day"
+    take_profit_price: Decimal | None = Field(default=None, gt=0)
+    stop_loss_price: Decimal | None = Field(default=None, gt=0)
     rationale: str = ""
     confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class LLMExitPlan(BaseModel):
+    ticker: str
+    take_profit_price: Decimal | None = Field(default=None, gt=0)
+    stop_loss_price: Decimal | None = Field(default=None, gt=0)
 
 
 class LLMAlert(BaseModel):
@@ -99,6 +119,7 @@ class LLMDecision(BaseModel):
     orders: list[LLMOrder] = []
     cancel_order_ids: list[str] = []
     alerts: list[LLMAlert] = []
+    exit_plans: list[LLMExitPlan] = []
     watch: list[str] = []
     notes: str | None = Field(default=None, max_length=2000)
     next_wake_minutes: float | None = Field(default=None, ge=1, le=1440)
@@ -124,7 +145,11 @@ def build_state(ctx: Context) -> dict[str, Any]:
         if q:
             r = ctx.market.session_return(sym, ctx.now, min_bars=5)
             quotes[sym] = {"bid": _f(q.bid), "ask": _f(q.ask), "ask_size": q.ask_size,
+                           "spread_pct": round(float((q.ask - q.bid) / ((q.ask + q.bid) / 2)) * 100, 2),
                            "today_pct": round(float(r) * 100, 2) if r is not None else None}
+            intra = ctx.market.intraday(sym, ctx.now)
+            if intra:
+                quotes[sym]["intraday"] = intra
             hist = ctx.market.history(sym)
             if hist:
                 quotes[sym]["history"] = hist
@@ -158,6 +183,8 @@ def build_state(ctx: Context) -> dict[str, Any]:
                          "limit": _f(o.limit_price) if o.limit_price else None,
                          "stop": _f(o.stop_price) if o.stop_price else None, "tif": o.tif} for o in ctx.open_orders],
         "alerts": [{"ticker": al["symbol"], "direction": al["direction"], "price": al["price"]} for al in ctx.alerts],
+        "exit_plans_running_without_you": [{"ticker": p["symbol"], "take_profit_price": p.get("take_profit"),
+                                            "stop_loss_price": p.get("stop_loss")} for p in ctx.exit_plans],
         "benchmark": None if ctx.benchmark_net_result is None else {
             "buy_and_hold_sp500_net_result": _f(ctx.benchmark_net_result),
             "you_minus_benchmark": _f(v["net_result"] - ctx.benchmark_net_result)},
@@ -198,10 +225,11 @@ class LLMLightAgent(Strategy):
         reasons = {w["reason"] for w in ctx.wakes}
         state = build_state(ctx)
         calls: list[dict[str, Any]] = []
-        direct = ctx.last_decision_at is None or ctx.last_decision_at < ctx.session[0] or "scheduled" in reasons
+        # Its own schedule and the regular timer go straight to the decision model: an active trader scans
+        # prices on a clock. Outside events (news, filings, moves, fills) pass through the cheap filter first.
+        direct = (ctx.last_decision_at is None or ctx.last_decision_at < ctx.session[0]
+                  or bool(reasons & {"scheduled", "timer"}))
         if not direct:
-            if reasons == {"timer"} and not ctx.news:
-                return None                                   # nothing new: thinking would be wasted money
             try:
                 t = await self.llm.chat(self.triage_model, TRIAGE_SYSTEM, json.dumps({
                     "events": state["woken_by"], "news": state["news_since_your_last_decision"][:15],
@@ -251,6 +279,10 @@ class LLMLightAgent(Strategy):
             orders=orders, cancel=dec.cancel_order_ids,
             alerts=[{"symbol": al.ticker.upper(), "direction": al.direction, "price": str(al.price), "note": al.note}
                     for al in dec.alerts],
+            exit_plans=[{"symbol": t, "take_profit": str(tp) if tp else None, "stop_loss": str(sl) if sl else None}
+                        for t, tp, sl in [(o.ticker.upper(), o.take_profit_price, o.stop_loss_price) for o in dec.orders
+                                          if o.action == "buy" and o.ticker.upper() not in refused]
+                        + [(e.ticker.upper(), e.take_profit_price, e.stop_loss_price) for e in dec.exit_plans] if tp or sl],
             watch=[w.upper() for w in dec.watch][:10], next_wake_minutes=dec.next_wake_minutes, summary=dec.summary,
             notes=dec.notes[:800] if dec.notes else None,
             detail={"llm_calls": calls, "escalated": True, "news_ids": news_ids, "state_seen": state,

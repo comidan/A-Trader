@@ -272,7 +272,7 @@ def test_llm_agent_pays_for_its_tokens_immediately_and_trades_validated_json(tmp
     assert len(r.engine.state.alerts) == 1
     state = json.loads(llm.calls[0][2])
     assert state["account"]["costs_paid_so_far"]["your_thinking_tokens"] == 0
-    assert state["quotes"]["AAPL"] == {"bid": 99.9, "ask": 100.0, "ask_size": 1000, "today_pct": None}
+    assert state["quotes"]["AAPL"] == {"bid": 99.9, "ask": 100.0, "ask_size": 1000, "spread_pct": 0.1, "today_pct": None}
 
 
 def test_llm_agent_triage_can_stop_before_the_expensive_call(tmp_path):
@@ -283,7 +283,7 @@ def test_llm_agent_triage_can_stop_before_the_expensive_call(tmp_path):
     r.step("llm_light", reason="news")
     assert [c[1] for c in llm.calls] == ["decision", "triage"]
     assert r.acct("llm_light").token_cost == D("0.016")
-    assert r.step("llm_light", reason="timer") is None and len(llm.calls) == 2   # quiet timer wake costs nothing
+    assert r.acct("llm_light").token_cost == D("0.016")
 
 
 def test_llm_agent_invalid_reply_costs_money_but_places_no_order(tmp_path):
@@ -478,3 +478,101 @@ def test_unreadable_triage_reply_passes_the_event_on_instead_of_hiding_it(tmp_pa
     r.step("llm_light")
     d = r.step("llm_light", reason="price_move")
     assert [c[1] for c in llm.calls] == ["decision", "triage", "decision"] and d.summary == "looked properly"
+
+
+# ---------------------------------------------------------------- active trading
+def test_timer_wake_goes_straight_to_the_decision_model_so_the_agent_scans_on_a_clock(tmp_path):
+    hold = json.dumps({"summary": "nothing yet", "orders": []})
+    llm = FakeLLM([hold, hold])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.step("llm_light", reason="timer")
+    assert [c[1] for c in llm.calls] == ["decision", "decision"]
+
+
+def bar(rig, symbol, price):
+    rig.now += timedelta(seconds=60)
+    rig.engine.on_bar(symbol, {"t": rig.now.isoformat(), "recv_ts": rig.now, "o": D(str(price)), "h": D(str(price)),
+                               "l": D(str(price)), "c": D(str(price)), "v": 100}, "test")
+
+
+def test_take_profit_sells_without_the_model_as_soon_as_the_bid_reaches_it(tmp_path):
+    reply = json.dumps({"summary": "scalp", "orders": [{"action": "buy", "ticker": "AAPL", "quantity": 10,
+                                                        "take_profit_price": 102, "stop_loss_price": 99}]})
+    llm = FakeLLM([reply])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.quote("AAPL", 100, 100.05)                      # bought
+    assert r.engine.state.exit_plans["llm_light:AAPL"]["take_profit"] == "102"
+    r.quote("AAPL", 101.5, 101.6)                     # not there yet
+    assert r.acct("llm_light").qty("AAPL") == 10
+    r.quote("AAPL", 102.1, 102.2)                     # reached: a limit sell goes in...
+    r.quote("AAPL", 102.15, 102.25)                   # ...and fills on the next quote, at the bid
+    assert r.acct("llm_light").positions == {} and r.engine.state.exit_plans == {}
+    sell = r.ledger.entries(r.engine.sim["id"], ("fill",), "llm_light")[-1].payload
+    assert sell["side"] == "sell" and sell["price"] == "102.15" and sell["meta"]["source"] == "exit_plan"
+    assert len(llm.calls) == 1                        # the exit cost no thinking
+
+
+def test_stop_triggers_on_a_real_traded_price_not_on_a_quote_that_only_widened(tmp_path):
+    reply = json.dumps({"summary": "scalp", "orders": [{"action": "buy", "ticker": "AAPL", "quantity": 10,
+                                                        "take_profit_price": 110, "stop_loss_price": 98}]})
+    r = EngineRig(tmp_path, strategies="llm_light", llm=FakeLLM([reply]))
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.quote("AAPL", 100, 100.05)
+    bar(r, "AAPL", 100)
+    r.quote("AAPL", 94, 106)                          # the quote widens to 12%: no trade happened, nothing is sold
+    assert r.acct("llm_light").qty("AAPL") == 10
+    bar(r, "AAPL", 97.9)                              # shares really traded below the stop
+    r.quote("AAPL", 97.8, 97.9)
+    assert r.acct("llm_light").positions == {}
+    assert "Stop reached" in r.ledger.entries(r.engine.sim["id"], ("fill",), "llm_light")[-1].payload["meta"]["rationale"]
+
+
+def test_exit_plans_survive_a_restart_and_can_be_moved(tmp_path):
+    buy_ = json.dumps({"summary": "b", "orders": [{"action": "buy", "ticker": "AAPL", "quantity": 5, "take_profit_price": 105, "stop_loss_price": 97}]})
+    move = json.dumps({"summary": "m", "orders": [], "exit_plans": [{"ticker": "AAPL", "take_profit_price": 108, "stop_loss_price": 100}]})
+    r = EngineRig(tmp_path, strategies="llm_light", llm=FakeLLM([buy_, move]))
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.quote("AAPL", 100, 100)
+    r.step("llm_light", reason="timer")
+    restarted = r.new_engine()
+    assert restarted.state.exit_plans["llm_light:AAPL"]["take_profit"] == "108"
+    assert restarted.state.exit_plans["llm_light:AAPL"]["stop_loss"] == "100"
+
+
+def test_a_widening_quote_is_not_a_price_move_and_real_moves_have_a_cooldown(rig):
+    rig.scripted.wants_events = True
+    q = rig.engine.runners["scripted"].queue
+    rig.quote("AAPL", 99.99, 100.01)
+    rig.quote("AAPL", 95, 106)                        # spread 11%: ignored
+    rig.quote("AAPL", 99.99, 100.01)
+    assert q.empty()
+    rig.quote("AAPL", 101.99, 102.01)                 # a real +2% on a tight quote
+    assert q.get_nowait()["reason"] == "price_move"
+    rig.quote("AAPL", 99.99, 100.01)                  # swings back within the cooldown: no second paid wake
+    assert q.empty()
+
+
+def test_quote_gap_reports_how_much_of_a_loss_is_only_the_wide_quote(rig):
+    rig.quote("AAPL", 99.9, 100)
+    rig.scripted.script = [buy(qty=10)]
+    rig.step()
+    rig.quote("AAPL", 100, 100)
+    bar(rig, "AAPL", 100)
+    rig.quote("AAPL", 95, 105)                        # last trade 100, quoted sell price 95
+    v = rig.engine.value("scripted")
+    assert v["quote_gap"] == D("50") and v["equity"] == D("5000") - 1000 - 9 + 950      # headline stays at the bid
+
+
+def test_broker_fee_is_configurable(tmp_path):
+    r = EngineRig(tmp_path)
+    assert r.engine.profile.commission_per_order == D("9")
+    cheap = Settings(_env_file=None, db_path=str(tmp_path / "c.sqlite"), broker_commission_usd="1", broker_name="Cheap broker")
+    from tradelab.engine import Engine as E
+    e = E(cheap, r.ledger, r.sims, EventBus(), r.market, r.store, r.factory)
+    assert e.profile.commission_per_order == D("1") and e.profile.name == "Cheap broker"
