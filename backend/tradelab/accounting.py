@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_UP, Decimal
 from typing import Any
 
-from .models import CENT, BrokerProfile, D, Order, d
+from .models import CENT, BrokerProfile, D, Order, d, is_crypto
 
 
 @dataclass
@@ -53,34 +53,47 @@ class Account:
         p = self.positions.get(symbol)
         return p.qty if p else 0
 
-    def loss_credit(self, year: int) -> Decimal:
-        return sum((d(a) for a, exp in self.losses if exp >= year), D(0))
+    def loss_credit(self, year: int, bucket: str = "securities") -> Decimal:
+        """Unexpired losses usable against later gains. Crypto losses only offset crypto gains and vice versa."""
+        return sum((d(l[0]) for l in self.losses if l[1] >= year and (l[2] if len(l) > 2 else "securities") == bucket), D(0))
 
     @property
     def costs(self) -> Decimal:
         return self.commissions + self.taxes + self.token_cost + self.stamp_duty
 
 
-def tax_on_sale(acct: Account, gain: Decimal, is_etf: bool, year: int, profile: BrokerProfile) -> dict[str, Any]:
-    """Pure: tax due and loss-credit movements for one realised gain/loss."""
-    out = {"tax": D(0), "loss_used": D(0), "loss_created": D(0), "loss_expiry": None}
+def tax_class(symbol: str, is_etf: bool) -> str:
+    return "crypto" if is_crypto(symbol) else "fund" if is_etf else "stock"
+
+
+def tax_on_sale(acct: Account, gain: Decimal, is_etf: bool, year: int, profile: BrokerProfile, kind: str | None = None) -> dict[str, Any]:
+    """Pure: tax due and loss-credit movements for one realised gain/loss.
+
+    kind: "stock" (26%, may use earlier losses), "fund" (26%, may not), "crypto" (33% from 2026, its own loss bucket).
+    """
+    kind = kind or ("fund" if is_etf else "stock")
+    bucket = "crypto" if kind == "crypto" else "securities"
+    rate = profile.crypto_tax_rate if kind == "crypto" else profile.capital_gains_tax_rate
+    out = {"tax": D(0), "loss_used": D(0), "loss_created": D(0), "loss_expiry": None, "tax_bucket": bucket}
     if gain < 0:
         out["loss_created"] = -gain
         out["loss_expiry"] = year + profile.loss_carry_forward_years
         return out
     taxable = gain
-    if not is_etf:
-        out["loss_used"] = min(gain, acct.loss_credit(year))
+    if kind != "fund":
+        out["loss_used"] = min(gain, acct.loss_credit(year, bucket))
         taxable = gain - out["loss_used"]
-    out["tax"] = (taxable * profile.capital_gains_tax_rate).quantize(CENT, rounding=ROUND_UP)
+    out["tax"] = (taxable * rate).quantize(CENT, rounding=ROUND_UP)
     return out
 
 
-def _consume_losses(acct: Account, amount: Decimal, year: int) -> None:
+def _consume_losses(acct: Account, amount: Decimal, year: int, bucket: str = "securities") -> None:
     acct.losses = [l for l in acct.losses if l[1] >= year]
     for l in acct.losses:
         if amount <= 0:
             break
+        if (l[2] if len(l) > 2 else "securities") != bucket:
+            continue
         take = min(d(l[0]), amount)
         l[0] = d(l[0]) - take
         amount -= take
@@ -188,10 +201,11 @@ def _apply_fill(state: SimState, a: Account, p: dict[str, Any]) -> None:
         a.realized_gain += gain
         a.closed_trades += 1
         a.winning_trades += 1 if gain > 0 else 0
+        bucket = p.get("tax_bucket", "securities")
         if d(p["loss_used"]) > 0:
-            _consume_losses(a, d(p["loss_used"]), int(p["tax_year"]))
+            _consume_losses(a, d(p["loss_used"]), int(p["tax_year"]), bucket)
         if d(p["loss_created"]) > 0:
-            a.losses.append([d(p["loss_created"]), int(p["loss_expiry"])])
+            a.losses.append([d(p["loss_created"]), int(p["loss_expiry"])] + (["crypto"] if bucket == "crypto" else []))
         if pos.qty == 0:
             del a.positions[sym]
             state.exit_plans.pop(f"{a.strategy_id}:{sym}", None)        # nothing left to exit
@@ -214,24 +228,27 @@ def valuation(a: Account, bids: dict[str, Decimal], is_etf, year: int, profile: 
     """
     market_value = D(0)
     exit_costs = D(0)
-    credit = a.loss_credit(year)
+    credit = {"securities": a.loss_credit(year), "crypto": a.loss_credit(year, "crypto")}
     unpriced: list[str] = []
     unrealized = D(0)
     for sym, pos in a.positions.items():
         bid = bids.get(sym)
         if bid is None:
             unpriced.append(sym)
-            exit_costs += D(0)
             continue
         value = pos.qty * bid
         market_value += value
-        gain = value - profile.commission_per_order - pos.basis
+        crypto = is_crypto(sym)
+        fee = value * profile.crypto_fee_rate if crypto else profile.commission_per_order
+        gain = value - fee - pos.basis
         unrealized += value - pos.basis
-        exit_costs += profile.commission_per_order
+        exit_costs += fee
         if gain > 0:
-            used = D(0) if is_etf(sym) else min(gain, credit)
-            credit -= used
-            exit_costs += ((gain - used) * profile.capital_gains_tax_rate).quantize(CENT, rounding=ROUND_UP)
+            bucket = "crypto" if crypto else "securities"
+            used = D(0) if (not crypto and is_etf(sym)) else min(gain, credit[bucket])
+            credit[bucket] -= used
+            rate = profile.crypto_tax_rate if crypto else profile.capital_gains_tax_rate
+            exit_costs += ((gain - used) * rate).quantize(CENT, rounding=ROUND_UP)
     equity = a.cash + market_value
     net_liq = equity - exit_costs
     return {

@@ -56,3 +56,13 @@ class Rig:
 
     def fills(self): return [p for k, _, p in self.events if k == "fill"]
     def kinds(self): return [k for k, _, _ in self.events]
+
+
+class CryptoMarket(FakeMarket):
+    """Stock market closed, crypto open: as on a weekend."""
+    def __init__(self):
+        super().__init__()
+        self.open = False
+
+    def is_open_for(self, symbol, now):
+        return "/" in symbol or self.open

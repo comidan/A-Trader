@@ -21,8 +21,8 @@ from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Callable, Protocol
 
-from .accounting import SimState, tax_on_sale
-from .models import BrokerProfile, D, Order, OrderRequest, Quote
+from .accounting import SimState, tax_class, tax_on_sale
+from .models import BrokerProfile, D, Order, OrderRequest, Quote, is_crypto
 
 TICK = D("0.0001")
 
@@ -50,14 +50,23 @@ class SimBroker:
         self._used: dict[tuple[str, str, str], tuple[int, int]] = {}   # (strategy, symbol, side) -> (quote seq, shares used)
 
     # ------------------------------------------------------------------ submit
+    def _open(self, symbol: str, now: datetime) -> bool:
+        """Stocks follow the exchange calendar; crypto trades around the clock."""
+        f = getattr(self.market, "is_open_for", None)
+        return f(symbol, now) if f else self.market.is_open(now)
+
+    def fee(self, symbol: str, qty: int, price: Decimal, first_fill: bool) -> Decimal:
+        """Stocks: one flat commission per executed order. Crypto: a percentage of every fill."""
+        if is_crypto(symbol):
+            return qty * price * self.profile.crypto_fee_rate
+        return self.profile.commission_per_order if first_fill else D(0)
+
     def available_cash(self, strategy_id: str) -> Decimal:
         a = self.state.accounts[strategy_id]
         reserved = D(0)
         for o in self.state.open_orders(strategy_id):
             if o.side == "buy":
-                reserved += o.remaining * o.reserve_price
-                if not o.commission_charged:
-                    reserved += self.profile.commission_per_order
+                reserved += o.remaining * o.reserve_price + self.fee(o.symbol, o.remaining, o.reserve_price, not o.commission_charged)
         return a.cash - reserved
 
     def sellable(self, strategy_id: str, symbol: str) -> int:
@@ -92,7 +101,7 @@ class SimBroker:
             return "limit order needs a positive limit price"
         if r.type == "stop" and (r.stop_price is None or r.stop_price <= 0):
             return "stop order needs a positive stop price"
-        if not self.market.is_open(now):
+        if not self._open(r.symbol, now):
             return "market is closed"
         why = self.market.tradable(r.symbol)
         if why:
@@ -100,14 +109,17 @@ class SimBroker:
         q = self.market.fresh_quote(r.symbol, now)
         if q is None or not q.valid():
             return "no live quote for this symbol (data missing or late: ticker suspended)"
-        if q.ask < self.profile.min_price:
+        crypto = is_crypto(r.symbol)
+        if crypto and r.qty * q.ask < self.profile.crypto_min_order_usd:
+            return f"order below the minimum of ${self.profile.crypto_min_order_usd}"
+        if not crypto and q.ask < self.profile.min_price:
             return f"price below the broker minimum of ${self.profile.min_price}"
         if r.side == "sell":
             if r.qty > self.sellable(sid, r.symbol):
                 return "shares not held (short selling is not allowed)"
         else:
             ref = r.limit_price if r.type == "limit" else max(q.ask, r.stop_price or D(0))
-            need = r.qty * ref + self.profile.commission_per_order
+            need = r.qty * ref + self.fee(r.symbol, r.qty, ref, True)
             if need > self.available_cash(sid):
                 return "insufficient cash"
             if self.risk_check:
@@ -124,13 +136,13 @@ class SimBroker:
 
     def expire_day_orders(self) -> None:
         for o in list(self.state.orders.values()):
-            if o.tif == "day":
+            if o.tif == "day" and not is_crypto(o.symbol):        # crypto never closes: its orders stay until filled
                 self.emit("order_expired", {"order_id": o.id, "reason": "market closed", "unfilled_qty": o.remaining},
                           o.strategy_id)
 
     # ------------------------------------------------------------------ fills
     def on_quote(self, q: Quote) -> None:
-        if not q.valid() or not self.market.is_open(q.recv_ts) or self.market.is_halted(q.symbol):
+        if not q.valid() or not self._open(q.symbol, q.recv_ts) or self.market.is_halted(q.symbol):
             return
         for o in sorted(self.state.open_orders(symbol=q.symbol), key=lambda o: o.ready_ts):
             if o.id in self.state.orders:
@@ -160,9 +172,13 @@ class SimBroker:
         used = used if seq == q.seq else 0
         qty = min(o.remaining, size - used)
         acct = self.state.accounts[o.strategy_id]
-        commission = D(0) if o.commission_charged else self.profile.commission_per_order
+        crypto = is_crypto(o.symbol)
         if buy:
-            affordable = int((acct.cash - commission) / price) if acct.cash > commission else 0
+            if crypto:
+                affordable = int(acct.cash / (price * (1 + self.profile.crypto_fee_rate))) if acct.cash > 0 else 0
+            else:
+                flat = self.fee(o.symbol, 0, price, not o.commission_charged)
+                affordable = int((acct.cash - flat) / price) if acct.cash > flat else 0
             if affordable < 1:
                 self.cancel(o.id, "insufficient cash at the fill price")
                 return
@@ -171,6 +187,7 @@ class SimBroker:
             qty = min(qty, acct.qty(o.symbol))
         if qty < 1:
             return
+        commission = self.fee(o.symbol, qty, price, not o.commission_charged)
         payload: dict[str, Any] = {
             "order_id": o.id, "symbol": o.symbol, "side": o.side, "qty": qty, "price": str(price),
             "commission": str(commission), "quote": q.to_dict(), "order_ready_ts": o.ready_ts.isoformat(),
@@ -181,8 +198,10 @@ class SimBroker:
             cost = pos.basis * qty / pos.qty if qty < pos.qty else pos.basis
             gain = qty * price - commission - cost
             year = self.market.tax_year(q.recv_ts)
-            t = tax_on_sale(acct, gain, self.market.is_etf(o.symbol), year, self.profile)
+            etf = self.market.is_etf(o.symbol)
+            t = tax_on_sale(acct, gain, etf, year, self.profile, tax_class(o.symbol, etf))
             payload.update(cost_basis=str(cost), realized_gain=str(gain), tax=str(t["tax"]), tax_year=year,
+                           tax_bucket=t["tax_bucket"],
                            loss_used=str(t["loss_used"]), loss_created=str(t["loss_created"]),
                            loss_expiry=t["loss_expiry"])
         self._used[key] = (q.seq, used + qty)

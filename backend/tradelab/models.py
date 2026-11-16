@@ -8,6 +8,11 @@ from typing import Any
 
 D = Decimal
 CENT = D("0.01")
+CRYPTO_LOT = D("0.000001")     # crypto is traded in whole "units" of one millionth of a coin, so quantities stay integers
+
+
+def is_crypto(symbol: str) -> bool:
+    return "/" in symbol
 
 
 def d(x: Any) -> Decimal:
@@ -99,4 +104,8 @@ class BrokerProfile:
     stamp_duty_annual_rate: Decimal = D("0.002")  # "imposta di bollo" on securities value
     dividend_us_withholding: Decimal = D("0.15")  # US-Italy treaty rate, withheld at source
     dividend_italian_tax: Decimal = D("0.26")     # applied on what is left after the US withholding
+    # Crypto (Alpaca crypto fee schedule, tier 1, read 2026-11-16; Italian rate from 2026)
+    crypto_fee_rate: Decimal = D("0.0025")        # 0.25% of every fill (we always take liquidity)
+    crypto_tax_rate: Decimal = D("0.33")
+    crypto_min_order_usd: Decimal = D("1")
     source: str = "https://www.directa.it/api/media/file/commissioni-mercato-USA.pdf (read 2026-11-14)"

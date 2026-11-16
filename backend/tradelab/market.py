@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .models import Quote
+from .models import CRYPTO_LOT, Quote, is_crypto
 
 NY = ZoneInfo("America/New_York")
 HALT_CODES = {"H", "P", "2"}            # trading halt / volatility pause
@@ -34,6 +34,7 @@ class MarketState:
         self.daily: dict[str, list[float]] = {}        # adjusted daily closes, oldest first (completed days only)
         self.daily_received_at: datetime | None = None
         self.movers: dict[str, Any] = {}               # filtered screener snapshot, with its receive time
+        self.crypto_assets: dict[str, dict[str, Any]] = {}
         self.daily_ohlc: dict[str, list[dict[str, float]]] = {}
         self.options: dict[str, dict[str, Any]] = {}   # option-implied move per ticker
         self.social: dict[str, dict[str, Any]] = {}    # crowd sentiment per ticker
@@ -55,6 +56,14 @@ class MarketState:
 
     def session(self, now: datetime) -> tuple[datetime, datetime] | None:
         return self.calendar.get(now.astimezone(NY).date()) if self.calendar_ok(now) else None
+
+    def is_open_for(self, symbol: str, now: datetime) -> bool:
+        return True if is_crypto(symbol) else self.is_open(now)
+
+    @staticmethod
+    def lot(symbol: str) -> Decimal:
+        """Size of one tradable unit: a whole share, or one millionth of a coin."""
+        return CRYPTO_LOT if is_crypto(symbol) else Decimal(1)
 
     def is_open(self, now: datetime) -> bool:
         s = self.session(now)
@@ -83,6 +92,8 @@ class MarketState:
                                      "tradable": bool(r.get("tradable")), "status": r.get("status")} for r in rows}
 
     def tradable(self, symbol: str) -> str | None:
+        if is_crypto(symbol):
+            return None if symbol in self.crypto_assets else "unknown or untradable crypto pair"
         if not self.assets:
             return "asset list not loaded yet"
         a = self.assets.get(symbol)
@@ -95,10 +106,14 @@ class MarketState:
         return None
 
     def is_etf(self, symbol: str) -> bool:
+        if is_crypto(symbol):
+            return False
         """Funds are taxed more harshly; when the name is ambiguous we assume fund (conservative)."""
         return symbol in self.etf_overrides or bool(FUND_WORDS.search(self.assets.get(symbol, {}).get("name", "")))
 
     def name(self, symbol: str) -> str:
+        if is_crypto(symbol):
+            return self.crypto_assets.get(symbol, {}).get("name", "")
         return self.assets.get(symbol, {}).get("name", "")
 
     # ---- quotes / halts / bars
