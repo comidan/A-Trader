@@ -468,3 +468,13 @@ def test_ai_trader_cannot_buy_the_benchmark_and_sees_text_movers_and_the_gap(tmp
     assert accepted == ["AAPL"]                                                   # the SPY purchase never reached the broker
     d = r.ledger.entries(r.engine.sim["id"], ("decision",), "llm_light")[0].payload
     assert d["detail"]["index_fund_buys_refused"] == ["SPY"]
+
+
+def test_unreadable_triage_reply_passes_the_event_on_instead_of_hiding_it(tmp_path):
+    llm = FakeLLM([json.dumps({"summary": "wait", "orders": []}), '{"escalate": true, "reason": "NVDA fell 1.8% in 5 minutes on AI-sec',
+                   json.dumps({"summary": "looked properly", "orders": []})])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    d = r.step("llm_light", reason="price_move")
+    assert [c[1] for c in llm.calls] == ["decision", "triage", "decision"] and d.summary == "looked properly"

@@ -21,7 +21,7 @@ TRIAGE_SYSTEM = """You are the cheap first filter for an active stock trader who
 the events that just happened and the trader's positions. Decide whether the expensive decision model should be \
 consulted now. Consult it if an event plausibly creates a trade or changes a position: news on a held or watched \
 company, on one of its suppliers, customers or competitors, a filing, a sharp move, a fill. Skip routine noise. Reply with JSON only: \
-{"escalate": true|false, "reason": "<one short sentence>"}"""
+{"escalate": true|false, "reason": "<at most 20 words>"}"""
 
 DECISION_SYSTEM = """You are a professional active trader running a simulated brokerage account that mirrors a real one. \
 Your job is to beat the S&P 500 by buying and selling stocks. You are measured on one number: the account's net \
@@ -206,7 +206,7 @@ class LLMLightAgent(Strategy):
                 t = await self.llm.chat(self.triage_model, TRIAGE_SYSTEM, json.dumps({
                     "events": state["woken_by"], "news": state["news_since_your_last_decision"][:15],
                     "positions": state["account"]["positions"], "open_orders": state["open_orders"]}),
-                    max_tokens=300, purpose="triage")
+                    max_tokens=2000, purpose="triage")       # the model's hidden reasoning counts against this limit
             except LLMError as e:
                 return Decision(summary="Triage call failed; holding.", detail={"error": str(e)})
             ctx.charge_tokens(t.usage())
@@ -215,7 +215,8 @@ class LLMLightAgent(Strategy):
                 verdict = extract_json(t.text)
                 escalate, why = bool(verdict.get("escalate")), str(verdict.get("reason", ""))[:300]
             except (ValueError, AttributeError):
-                escalate, why = False, "triage reply was not valid JSON"
+                # an unreadable filter must not hide a real event: let the decision model look
+                escalate, why = True, "the filter's reply could not be read, so the event was passed on"
             if not escalate:
                 return Decision(summary=f"Checked the news, nothing worth acting on. {why}",
                                 detail={"triage": why, "llm_calls": calls, "escalated": False})
@@ -230,7 +231,7 @@ class LLMLightAgent(Strategy):
                                         round_trip=ctx.profile.commission_per_order * 2,
                                         pct_500=round(float(ctx.profile.commission_per_order) * 2 / 500 * 100, 1),
                                         pct_2500=round(float(ctx.profile.commission_per_order) * 2 / 2500 * 100, 2)),
-                                    json.dumps(state), max_tokens=6000, purpose="decision")
+                                    json.dumps(state), max_tokens=8000, purpose="decision")
         except LLMError as e:
             return Decision(summary="Decision call failed; holding.", detail={"error": str(e), "llm_calls": calls})
         ctx.charge_tokens(r.usage())

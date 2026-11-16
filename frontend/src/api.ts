@@ -87,6 +87,7 @@ export function useLive() {
   const [receivedAt, setReceivedAt] = useState<number | null>(null);
   const [eventCount, setEventCount] = useState(0);
   const retry = useRef(0);
+  const pending = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -98,7 +99,8 @@ export function useLive() {
       ws.onmessage = (m) => {
         const msg = JSON.parse(m.data);
         if (msg.type === "tick") { setStatus(msg.status); setOverview(msg.overview); setReceivedAt(Date.now()); }
-        else if (msg.type === "event") setEventCount((n) => n + 1);
+        else if (msg.type === "event" && pending.current === undefined)       // a burst of events = one refresh
+          pending.current = window.setTimeout(() => { pending.current = undefined; setEventCount((n) => n + 1); }, 2500);
       };
       ws.onclose = () => {
         setConnected(false);

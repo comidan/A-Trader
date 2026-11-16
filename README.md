@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 108 tests
+cd backend && pip install -e '.[dev]' && pytest          # 109 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
