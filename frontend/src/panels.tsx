@@ -12,7 +12,7 @@ const Hint = ({ text }: { text: string }) => <span className="hint" title={text}
 const WAKE: Record<string, string> = {
   timer: "routine check", scheduled: "its own scheduled check", news: "a news story", filing: "a company filing",
   price_move: "a sharp price move", price_alert: "a price alert it had set", fill: "one of its orders being executed",
-  market_open: "the market opening",
+  market_open: "the market opening", simulation_started: "the simulation starting",
 };
 
 // ------------------------------------------------------------------ activity

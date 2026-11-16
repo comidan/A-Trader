@@ -16,6 +16,10 @@ function headline(o: Overview): { title: string; text: string; tone: "up" | "dow
   if (!ai) return { title: "No AI agent is running", text: Object.values(o.not_running)[0] ?? "Only the simple strategies are trading.", tone: "" };
   if (!bh || o.strategies.every((s) => s.fills === 0))
     return { title: "Waiting for the first trades", text: o.market.state === "open" ? "The market is open; the strategies are deciding." : "The US market is closed. Nothing trades until it opens.", tone: "" };
+  if (ai.fills === 0)
+    return { title: "The AI has not traded yet", text: o.market.state === "open"
+      ? `${ai.name} is watching the market${ai.thinking ? " and thinking right now" : ""}. It looks as soon as the simulation starts, then every few minutes and on every relevant event.`
+      : "The US market is closed. It will look again as soon as it opens.", tone: "" };
   const diff = ai.net_result - bh.net_result;
   return diff > 0
     ? { title: "The AI is ahead", text: `${ai.name} is ${usd(diff)} ahead of simply buying the S&P 500, after all costs. Early leads are often luck: see the Scorecard.`, tone: "up" }

@@ -152,7 +152,14 @@ class Engine:
         except RuntimeError:
             pass                                    # no loop (tests drive step() directly)
         self.sync_universe()
+        if self.running:
+            self.wake_all("simulation_started")
         log.info("engine_loaded", extra={"sim_id": self.sim["id"], "strategies": list(self.runners)})
+
+    def wake_all(self, reason: str) -> None:
+        """Every strategy takes a look right now instead of waiting for its own timer."""
+        for r in self.runners.values():
+            r.wake(reason)
 
     def _make_broker(self) -> None:
         s = self.state.settings
@@ -165,7 +172,10 @@ class Engine:
         if (active or {}).get("id") != (self.sim or {}).get("id"):
             self.load()
         else:
+            was_running = self.running
             self.sim = active
+            if self.running and not was_running:          # started or resumed: look at the market immediately
+                self.wake_all("simulation_started")
 
     def emit(self, kind: str, payload: dict[str, Any], strategy_id: str | None = None) -> None:
         entry = self.ledger.append(self.sim["id"], kind, payload, strategy_id)

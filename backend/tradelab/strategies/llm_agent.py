@@ -243,7 +243,7 @@ class LLMLightAgent(Strategy):
         # Its own schedule and the regular timer go straight to the decision model: an active trader scans
         # prices on a clock. Outside events (news, filings, moves, fills) pass through the cheap filter first.
         direct = (ctx.last_decision_at is None or ctx.last_decision_at < ctx.session[0]
-                  or bool(reasons & {"scheduled", "timer"}))
+                  or bool(reasons & {"scheduled", "timer", "simulation_started", "market_open"}))
         if not direct:
             try:
                 t = await self.llm.chat(self.triage_model, TRIAGE_SYSTEM, json.dumps({

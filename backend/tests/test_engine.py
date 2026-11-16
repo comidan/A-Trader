@@ -94,6 +94,13 @@ def rig(tmp_path):
     return EngineRig(tmp_path)
 
 
+def reasons(runner):
+    out = []
+    while not runner.queue.empty():
+        out.append(runner.queue.get_nowait()["reason"])
+    return out
+
+
 def buy(symbol="AAPL", qty=10, **kw):
     return Decision([OrderRequest(symbol, "buy", qty, **kw)], summary="test buy")
 
@@ -237,7 +244,7 @@ def test_price_alert_fires_once_and_wakes_the_strategy(rig):
     rig.quote("AAPL", 105, 105.1)
     rig.quote("AAPL", 106, 106.1)
     assert rig.kinds().count("alert_triggered") == 1
-    assert rig.engine.runners["scripted"].queue.get_nowait()["reason"] == "price_alert"
+    assert reasons(rig.engine.runners["scripted"])[-1] == "price_alert"
 
 
 def test_buy_and_hold_invests_everything_once(tmp_path):
@@ -548,6 +555,7 @@ def test_exit_plans_survive_a_restart_and_can_be_moved(tmp_path):
 def test_a_widening_quote_is_not_a_price_move_and_real_moves_have_a_cooldown(rig):
     rig.scripted.wants_events = True
     q = rig.engine.runners["scripted"].queue
+    reasons(rig.engine.runners["scripted"])            # drain the start-up wake
     rig.quote("AAPL", 99.99, 100.01)
     rig.quote("AAPL", 95, 106)                        # spread 11%: ignored
     rig.quote("AAPL", 99.99, 100.01)
@@ -626,3 +634,20 @@ def test_llm_agent_sees_indicators_rule_record_research_inputs_and_keeps_lessons
     assert state["rule_track_record"]["rules"]["pullback_in_uptrend"]["win_rate_pct"] == 62.5
     assert state["your_lessons"] == ["Chasing a gap up after news lost money twice."]
     assert r.new_engine().runners["llm_light"].lessons == ["Chasing a gap up after news lost money twice."]   # survives a restart
+
+
+def test_every_strategy_looks_at_once_when_a_simulation_starts_or_resumes(rig):
+    runner = rig.engine.runners["scripted"]
+    assert reasons(runner) == ["simulation_started"]              # the simulation was already running at load
+    rig.sims.transition(rig.engine.sim["id"], "pause")
+    rig.engine.refresh_sim()
+    assert reasons(runner) == []
+    rig.sims.transition(rig.engine.sim["id"], "resume")
+    rig.engine.refresh_sim()
+    assert reasons(runner) == ["simulation_started"]
+    fresh = rig.sims.create("next", D("5000"))                   # created, not started: nobody is woken yet
+    rig.engine.refresh_sim()
+    assert reasons(rig.engine.runners["scripted"]) == []
+    rig.sims.transition(fresh["id"], "start")
+    rig.engine.refresh_sim()
+    assert reasons(rig.engine.runners["scripted"]) == ["simulation_started"]

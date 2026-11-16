@@ -128,3 +128,4 @@ def test_strategy_loops_are_actually_running_after_creating_a_simulation_from_th
         assert all(r.task is not None and not r.task.done() for r in runners.values())
         c.post("/api/simulations", json={"name": "second"})
         assert all(r.task is not None and not r.task.done() for r in app.state.svc.engine.runners.values())
+
