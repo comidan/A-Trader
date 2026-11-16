@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     dashboard_password: SecretStr = SecretStr("")   # if set, the dashboard and API ask for it (user: tradelab)
     ingest_enabled: bool = True       # tests switch live connections off
     edgar_poll_seconds: float = 30
-    gdelt_poll_seconds: float = 900
+    gdelt_poll_seconds: float = 300    # GDELT publishes a new file every 15 minutes; we look every 5
     # World news: public RSS feeds as "Name=url" pairs separated by commas.
     world_news_feeds: str = ("BBC Business=https://feeds.bbci.co.uk/news/business/rss.xml,"
                              "BBC World=https://feeds.bbci.co.uk/news/world/rss.xml,"

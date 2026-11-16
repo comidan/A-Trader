@@ -429,3 +429,15 @@ def test_llm_agent_keeps_its_notes_and_sees_history_trades_and_break_even(tmp_pa
     assert h["last_close"] == 139.5 and h["pct_5d"] == round((139.5 / 137 - 1) * 100, 2) and h["pct_from_1y_high"] == 0
     restarted = r.new_engine()                       # the notes survive a restart (they live in the ledger)
     assert restarted.runners["llm_light"].notes.startswith("Thesis")
+
+
+def test_llm_agent_sees_market_wide_world_news_but_not_low_impact_noise(tmp_path):
+    llm = FakeLLM([json.dumps({"summary": "hold", "orders": []})])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    r.quote("AAPL", 99.9, 100)
+    base = {"kind": "world", "source": "GDELT (x)", "recv_ts": r.now.isoformat(), "symbols": [], "links": []}
+    r.engine.on_news({**base, "id": "w1", "headline": "Fed signals rate cut", "impact": "medium"})
+    r.engine.on_news({**base, "id": "w2", "headline": "Local festival opens", "impact": "low"})
+    r.step("llm_light")
+    seen = [n["headline"] for n in json.loads(llm.calls[0][2])["news_since_your_last_decision"]]
+    assert seen == ["Fed signals rate cut"]

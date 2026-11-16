@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
+import io
+import zipfile
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -31,8 +34,6 @@ HIGH_8K_ITEMS = {"1.01", "1.02", "1.03", "2.01", "2.02", "2.05", "2.06", "3.01",
 HIGH_WORDS = re.compile(r"\b(earnings|guidance|forecast|acquir\w*|merger|takeover|buyout|fda|lawsuits?|recall\w*|bankrupt\w*|"
                         r"investigat\w*|downgrad\w*|upgrad\w*|resign\w*|layoffs?|tariffs?|sanctions?|profit warning|"
                         r"beats?|miss(es|ed)?|raises?|cuts?|halts?)\b", re.I)
-GDELT_QUERY = ('(tariff OR sanctions OR "export controls" OR "supply chain" OR strike OR recall OR antitrust OR '
-               '"interest rates" OR "trade war" OR embargo OR shortage) sourcelang:english')
 
 
 def estimate_impact(kind: str, headline: str, symbols: list[str], links: list[dict], extra: dict[str, Any]) -> str:
@@ -95,20 +96,38 @@ def parse_edgar_atom(xml_text: str, recv_ts: datetime, cik_to_ticker: dict[int, 
     return out
 
 
-def parse_gdelt(body: dict[str, Any], recv_ts: datetime) -> list[dict[str, Any]]:
+MACRO_THEMES = ("ECON_INTEREST_RATE", "ECON_INFLATION", "ECON_CENTRALBANK", "ECON_TRADE_DISPUTE", "TARIFF", "SANCTION",
+                "ECON_STOCKMARKET", "ECON_BANKRUPTCY", "STRIKE", "ECON_OILPRICE", "EMBARGO")
+MACRO_WORDS = re.compile(r"\b(tariffs?|sanctions?|interest rates?|rate (cut|hike)s?|inflation|central bank|federal reserve|"
+                         r"the fed|ecb|oil prices?|opec|recession|trade war|export controls?|embargo|strike|shutdown|"
+                         r"default|stock market|wall street|treasury yields?|bond yields?|jobs report|gdp)\b", re.I)
+TITLE_RE = re.compile(r"<PAGE_TITLE>(.*?)</PAGE_TITLE>", re.S)
+
+
+def parse_gkg(text: str, recv_ts: datetime) -> list[dict[str, Any]]:
+    """Rows of a GDELT Global Knowledge Graph 2.1 file (tab separated, 27 columns) as world-news items.
+
+    Columns used: 1 batch time, 3 source, 4 url, 7 themes, 13 organisations, 26 extras (holds the page title).
+    """
     out = []
-    for a in body.get("articles") or []:
-        if not a.get("url") or not a.get("title"):
+    for line in text.split("\n"):
+        c = line.split("\t")
+        if len(c) < 27 or not c[4].startswith("http"):
             continue
-        seen = a.get("seendate") or ""
+        m = TITLE_RE.search(c[26])
+        if not m or not m.group(1).strip():
+            continue
         try:
-            pub = datetime.strptime(seen, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat()
+            pub = datetime.strptime(c[1], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).isoformat()
         except ValueError:
             pub = None
-        out.append({"id": "gdelt:" + hashlib.sha1(a["url"].encode()).hexdigest()[:20], "kind": "world",
-                    "source": f"GDELT ({a.get('domain', '')})", "recv_ts": iso(recv_ts), "published_ts": pub,
-                    "headline": a["title"], "summary": "", "url": a["url"], "symbols": [],
-                    "extra": {"country": a.get("sourcecountry")}})
+        orgs = [o for o in dict.fromkeys(c[13].split(";")) if o][:12]
+        themes = c[7].split(";")
+        out.append({"id": "gdelt:" + hashlib.sha1(c[4].encode()).hexdigest()[:20], "kind": "world",
+                    "source": f"GDELT ({c[3]})", "recv_ts": iso(recv_ts), "published_ts": pub,
+                    "headline": html.unescape(m.group(1).strip())[:300],
+                    "summary": ("Organisations mentioned: " + ", ".join(orgs)) if orgs else "", "url": c[4], "symbols": [],
+                    "extra": {"macro": sorted({t for t in MACRO_THEMES if any(x.startswith(t) for x in themes)})}})
     return out
 
 
@@ -189,6 +208,7 @@ class SecClient:
 async def edgar_loop(sec: SecClient, status: FeedStatus, on_item: Callable[[dict[str, Any]], bool], poll_s: float) -> None:
     ciks: dict[int, str] = {}
     fetched_ciks: datetime | None = None
+    failures = 0
     while True:
         try:
             if fetched_ciks is None or now_utc() - fetched_ciks > timedelta(hours=24):
@@ -202,36 +222,61 @@ async def edgar_loop(sec: SecClient, status: FeedStatus, on_item: Callable[[dict
                         new += on_item(item)
                 status.last_received_at_utc = iso(recv)
             status.state, status.detail = "live", f"polled every {int(poll_s)}s"
+            failures = 0
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            status.state, status.detail = "error", f"{type(e).__name__}: {e}"[:200]
-            log.warning("edgar_poll_failed", extra={"error": str(e)[:200]})
+            failures += 1                          # sec.gov times out now and then: one miss is not an outage
+            if failures >= 3:
+                status.state = "error"
+            status.detail = f"last poll failed ({type(e).__name__}: {e}"[:150] + f"); {failures} in a row, retrying"
+            log.warning("edgar_poll_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
         await asyncio.sleep(poll_s)
 
 
-async def gdelt_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], bool], poll_s: float) -> None:
-    async with httpx.AsyncClient(timeout=40) as http:
+GDELT_INDEX = "https://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+
+
+async def gdelt_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], dict[str, Any] | None],
+                     poll_s: float, max_macro: int = 15) -> None:
+    """GDELT world news from its public 15-minute knowledge-graph files (bulk files, no query API, no rate limit).
+
+    Only stories that touch a followed company (directly or through the relationship map), plus a few clearly
+    macro-economic ones per batch, are kept: a batch holds more than a thousand articles.
+    """
+    last_file = ""
+    failures = 0
+    async with httpx.AsyncClient(timeout=120, headers={"User-Agent": f"TradeLab/{__version__} (news reader)"}) as http:
         while True:
             try:
-                r = await http.get("https://api.gdeltproject.org/api/v2/doc/doc", params={
-                    "query": GDELT_QUERY, "mode": "artlist", "format": "json", "maxrecords": 75,
-                    "timespan": "30min", "sort": "datedesc"})
-                recv = now_utc()
-                if r.status_code != 200 or not r.text.lstrip().startswith("{"):
-                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:80]}")      # throttling replies are plain text
-                for item in parse_gdelt(r.json(), recv):
-                    on_item(item)
-                status.state, status.last_received_at_utc = "live", iso(recv)
-                status.detail = f"polled every {int(poll_s / 60)} min (GDELT itself updates every 15 min)"
-                wait = poll_s
+                index = (await http.get(GDELT_INDEX)).text
+                url = next((l.split()[2] for l in index.splitlines() if l.strip().endswith(".gkg.csv.zip")), "")
+                url = url.replace("http://", "https://", 1)
+                if url and url != last_file:
+                    r = await http.get(url)
+                    r.raise_for_status()
+                    recv = now_utc()
+                    text = await asyncio.to_thread(
+                        lambda: zipfile.ZipFile(io.BytesIO(r.content)).read(zipfile.ZipFile(io.BytesIO(r.content)).namelist()[0]).decode("utf-8", "replace"))
+                    kept = macro = 0
+                    for item in parse_gkg(text, recv):
+                        linked = on_item(item, True)
+                        if linked:
+                            kept += 1
+                        elif item["extra"]["macro"] and macro < max_macro and MACRO_WORDS.search(item["headline"]):
+                            on_item(item, False)
+                            macro += 1
+                    last_file = url
+                    status.last_received_at_utc = iso(recv)
+                    status.detail = f"batch {url.rsplit('/', 1)[-1][:14]}: {kept} stories about followed companies, {macro} macro stories kept"
+                failures = 0
+                status.state = "live"
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                # GDELT limits by IP address and often refuses; asking again sooner only makes it worse.
-                status.state = "error"
-                status.detail = (f"GDELT refused the request ({type(e).__name__}: {e}"[:150] + "). Optional extra source: "
-                                 f"world news still arrives through the news feeds above. Next try in {int(poll_s / 60)} min.")
+                failures += 1
+                if failures >= 3:
+                    status.state = "error"
+                status.detail = f"last check failed ({type(e).__name__}: {e}"[:150] + "); retrying"
                 log.warning("gdelt_poll_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
-                wait = poll_s
-            await asyncio.sleep(wait)
+            await asyncio.sleep(poll_s)

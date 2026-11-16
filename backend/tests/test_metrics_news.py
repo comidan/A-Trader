@@ -4,7 +4,7 @@ from decimal import Decimal as D
 
 from tradelab.crosscheck import deviation_bps
 from tradelab.graph import CompanyGraph, business_section, clean_filing
-from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gdelt, parse_rss
+from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gkg, parse_rss
 from tradelab.llm import cost_usd, extract_json, LLMError
 from tradelab.metrics import binomial_p, max_drawdown, sharpe, t_test_p, weekly_report
 from tradelab.storage.market_store import MarketStore
@@ -40,9 +40,6 @@ def test_alpaca_news_and_gdelt_items():
                      "url": "u", "symbols": ["TSLA"], "source": "benzinga"}, T)
     assert finish(n, None)["impact"] == "high" and n["id"] == "alpaca:7" and "benzinga" in n["source"]
     assert from_alpaca({"T": "n", "id": 8}, T) is None
-    g = parse_gdelt({"articles": [{"url": "http://x/1", "title": "New tariffs on chips", "seendate": "20261116T145500Z",
-                                   "domain": "x.com"}, {"title": "no url"}]}, T)
-    assert len(g) == 1 and g[0]["published_ts"].startswith("2026-11-16T14:55") and finish(g[0], None)["impact"] == "low"
     assert estimate_impact("company", "Market wrap", [], [], {}) == "low"
 
 
@@ -127,3 +124,35 @@ def test_rss_and_atom_world_news_items():
     a = parse_rss(atom, "Federal Reserve", T)[0]
     assert a["url"] == "https://fed/1" and a["published_ts"] == "2026-11-16T14:00:00+00:00"
     assert parse_rss(rss, "x", T)[0]["id"] == i["id"]              # same link, same id: no duplicates
+
+
+def _gkg_row(url, title, orgs="", themes="", when="20261116153000"):
+    c = [""] * 27
+    c[1], c[3], c[4], c[7], c[13], c[26] = when, "example.com", url, themes, orgs, f"<PAGE_LINKS>x</PAGE_LINKS><PAGE_TITLE>{title}</PAGE_TITLE>"
+    return "\t".join(c)
+
+
+def test_gdelt_knowledge_graph_rows_become_world_news_linked_through_the_company_map():
+    text = "\n".join([
+        _gkg_row("https://example.com/a", "Quake halts chip production &amp; exports", "tsmc;taiwan government", "NATURAL_DISASTER;ECON_STOCKMARKET"),
+        _gkg_row("https://example.com/b", "PS5 deals for Black Friday", "sony;gamers"),
+        _gkg_row("ftp://bad", "ignored"), "too\tshort", _gkg_row("https://example.com/c", "")])
+    items = parse_gkg(text, T)
+    assert [i["url"] for i in items] == ["https://example.com/a", "https://example.com/b"]
+    a = items[0]
+    assert a["headline"] == "Quake halts chip production & exports" and a["source"] == "GDELT (example.com)"
+    assert a["published_ts"] == "2026-11-16T15:30:00+00:00" and a["extra"]["macro"] == ["ECON_STOCKMARKET"]
+    assert a["summary"] == "Organisations mentioned: tsmc, taiwan government"
+    store = MarketStore(":memory:")
+    store.exec("INSERT INTO company_graph VALUES ('AAPL','t','{}','m','0',?)",
+               (json.dumps({"aliases": ["Apple"], "suppliers": [{"name": "TSMC", "ticker": "TSM"}], "customers": [], "competitors": []}),))
+    linked = finish(a, CompanyGraph(store))
+    assert linked["links"] == [{"symbol": "AAPL", "relation": "supplier", "via": "TSMC"}]     # matched on the organisation list
+    assert finish(items[1], CompanyGraph(store))["links"] == []
+
+
+def test_macro_keyword_filter_keeps_market_news_and_drops_noise():
+    from tradelab.ingest.news import MACRO_WORDS
+    keep = ["Oil prices fall as markets weigh supply", "Fed signals rate cut in December", "New tariffs on chips", "ECB holds interest rates"]
+    drop = ["Best sparkling wine under 20", "Local pension rules explained", "Football club appoints manager"]
+    assert all(MACRO_WORDS.search(h) for h in keep) and not any(MACRO_WORDS.search(h) for h in drop)

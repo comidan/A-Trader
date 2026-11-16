@@ -50,7 +50,7 @@ class Services:
         self.f_news = self.feeds.register(FeedStatus("alpaca_news", "Alpaca news websocket (Benzinga and others)"))
         self.f_edgar = self.feeds.register(FeedStatus("sec_edgar", "SEC EDGAR latest filings (8-K, 10-Q, 10-K)"))
         self.f_rss = self.feeds.register(FeedStatus("world_news", "World news feeds (BBC, MarketWatch, Federal Reserve)"))
-        self.f_gdelt = self.feeds.register(FeedStatus("gdelt", "GDELT world news (optional extra)"))
+        self.f_gdelt = self.feeds.register(FeedStatus("gdelt", "GDELT world news (15-minute knowledge-graph files)"))
         self.f_ref = self.feeds.register(FeedStatus("alpaca_reference", "Alpaca trading calendar and asset list"))
         self.engine = Engine(settings, self.ledger, self.sims, self.bus, self.market, self.store, self.make_strategy)
         self.rest: AlpacaRest | None = None
@@ -136,7 +136,7 @@ class Services:
             self.f_edgar.state, self.f_edgar.detail = "error", "SEC_USER_AGENT_EMAIL missing in .env (the SEC requires a contact)"
         if s.rss_feeds:
             self._spawn(news_mod.rss_loop(self.f_rss, self._on_item, s.rss_feeds, s.world_news_poll_seconds))
-        self._spawn(news_mod.gdelt_loop(self.f_gdelt, self._on_item, s.gdelt_poll_seconds))
+        self._spawn(news_mod.gdelt_loop(self.f_gdelt, self._on_gdelt, s.gdelt_poll_seconds))
         self._spawn(self._report_loop())
 
     def _spawn(self, coro) -> None:
@@ -200,6 +200,17 @@ class Services:
 
     def _on_item(self, item: dict[str, Any]) -> bool:
         return self.engine.on_news(news_mod.finish(item, self.graph))
+
+    def _on_gdelt(self, item: dict[str, Any], only_if_linked: bool) -> bool:
+        """Keep a GDELT story if it touches a followed company; macro stories are stored on the second call."""
+        done = news_mod.finish(item, self.graph)
+        if only_if_linked and not (done["symbols"] or done["links"]):
+            return False
+        # GDELT is broad and noisy: only a story with a market-moving word in its headline may wake an agent.
+        strong = bool(news_mod.HIGH_WORDS.search(done["headline"]) or news_mod.MACRO_WORDS.search(done["headline"]))
+        done["impact"] = "medium" if strong and "late_minutes" not in done["extra"] else "low"
+        self.engine.on_news(done)
+        return True
 
     # ------------------------------------------------------------------ background loops
     async def _reference_loop(self) -> None:

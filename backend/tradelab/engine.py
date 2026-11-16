@@ -403,6 +403,10 @@ class Engine:
         since = iso(runner.last_decision_at) if runner.last_decision_at else iso(now - timedelta(hours=12))
         symbols = set(self.universe.symbols()) | set(self.state.accounts[sid].positions)
         news = self.store.news(limit=60, since=since, symbols=symbols) if runner.strategy.is_llm else []
+        if runner.strategy.is_llm:                 # plus a few market-wide stories that name no company
+            wide = [n for n in self.store.news(limit=200, since=since)
+                    if n["kind"] == "world" and not n["symbols"] and not n["links"] and n["impact"] != "low"]
+            news = sorted(news + wide[:8], key=lambda n: n["recv_ts"], reverse=True)
 
         def charge(usage: dict[str, Any]) -> None:
             self.emit("token_cost", usage, sid)

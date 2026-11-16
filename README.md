@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 103 tests
+cd backend && pip install -e '.[dev]' && pytest          # 106 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -79,10 +79,11 @@ moment of the call and see what their thinking has cost.
   Dividends: 15% US withholding, then 26% Italian tax on the remainder.
 - **LLM:** IBM Consulting Advantage, OpenAI-compatible. Token prices default to Anthropic list
   prices; set `LLM_PRICES` to what ICA charges you. A model without a price is refused.
-- **News:** Alpaca news stream (company news), SEC EDGAR latest-filings feed, and public RSS feeds
-  for world news (BBC, MarketWatch, Federal Reserve; set `WORLD_NEWS_FEEDS` to change them). GDELT is
-  an optional extra: it limits by IP address and often refuses.
-  "Impact" is a rule-based estimate, not a prediction.
+- **News:** Alpaca news stream (company news), SEC EDGAR latest-filings feed, public RSS feeds (BBC,
+  MarketWatch, Federal Reserve; `WORLD_NEWS_FEEDS`) and GDELT for world news. GDELT is read from its
+  public 15-minute knowledge-graph files, not its query API (which rate-limits by IP and refuses most
+  networks). Of the thousand-plus articles per batch only those touching a followed company, plus a
+  few macro-economic ones, are kept. "Impact" is a rule-based estimate, not a prediction.
 - **Company graph:** built once per core company by the cheap model from its latest 10-K, cached.
   Its cost is shown as a platform cost and is not charged to any strategy.
 - **Headline number:** net liquidation value, i.e. everything sold at the bid, minus exit fees and
