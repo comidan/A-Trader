@@ -14,6 +14,7 @@ from typing import Any
 
 from .clock import iso, now_utc
 from .ingest.alpaca import AlpacaRest
+from .models import CRYPTO_LOT, is_crypto
 from .storage.market_store import MarketStore
 
 log = logging.getLogger(__name__)
@@ -51,19 +52,24 @@ class PaperMirror:
     async def _handle(self, kind: str, p: dict[str, Any]) -> None:
         if kind == "order_accepted":
             o = p["order"]
-            body = {"symbol": o["symbol"], "qty": str(o["qty"]), "side": o["side"], "type": o["type"],
-                    "time_in_force": o["tif"], "client_order_id": o["id"]}
+            crypto = is_crypto(o["symbol"])
+            if crypto and o["type"] == "stop":
+                return                                    # Alpaca crypto has no plain stop order: not comparable
+            lot = CRYPTO_LOT if crypto else Decimal(1)
+            body = {"symbol": o["symbol"], "qty": str(Decimal(o["qty"]) * lot), "side": o["side"], "type": o["type"],
+                    "time_in_force": "gtc" if crypto else o["tif"], "client_order_id": o["id"]}
             if o["limit_price"]:
-                body["limit_price"] = o["limit_price"]
+                body["limit_price"] = str(Decimal(o["limit_price"]) / lot)
             if o["stop_price"]:
-                body["stop_price"] = o["stop_price"]
+                body["stop_price"] = str(Decimal(o["stop_price"]) / lot)
             res = await self.rest.paper_submit(body)
             self.store.exec("INSERT OR REPLACE INTO paper_orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                 o["id"], self.sim_id(), p["strategy_id"], o["symbol"], o["side"], o["qty"], iso(now_utc()), "open",
                 res.get("status", "unknown"), 0, None, 0, None, None, res.get("detail", ""), iso(now_utc())))
         elif kind == "fill":
             fills = self.sim.setdefault(p["order_id"], [])
-            fills.append((int(p["qty"]), Decimal(p["price"])))
+            lot = CRYPTO_LOT if is_crypto(p["symbol"]) else Decimal(1)
+            fills.append((int(p["qty"]), Decimal(p["price"]) / lot))       # compared per share / per coin
             qty = sum(q for q, _ in fills)
             avg = sum(q * px for q, px in fills) / qty
             self.store.exec("UPDATE paper_orders SET sim_filled_qty=?, sim_avg_price=?, updated_ts=? WHERE order_id=?",

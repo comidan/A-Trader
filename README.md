@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 128 tests
+cd backend && pip install -e '.[dev]' && pytest          # 140 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -59,6 +59,8 @@ cd frontend && npm install && npm run dev                 # http://localhost:517
 | `mean_reversion` | Dip buyer | Each afternoon holds the 3 biggest fallers of the day. |
 | `technical_rules` | Rule-based trader | No AI: buys strong stocks after a sharp two-day drop, sells the bounce. Once a day. |
 | `llm_light` | AI trader | Cheap model triages events; one strong-model call decides; validated JSON. |
+| `crypto_buy_hold` | Buy & hold Bitcoin | Buys Bitcoin once. The bar for crypto. |
+| `crypto_ai` | Crypto AI trader | AI trading crypto around the clock; has to beat holding Bitcoin. |
 | `tradingagents` | AI team | TradingAgents multi-agent run per ticker per day (optional). |
 
 Agents are fully autonomous: woken by news, filings, sharp price moves, their own fills, price
@@ -133,6 +135,22 @@ price, never on a quote that merely widened.
 
 None of this guarantees it beats buy & hold: commissions, tax and the pessimistic free price feed
 all weigh on an active trader. That is what the experiment measures.
+
+## Crypto
+
+Crypto strategies run in the same simulation, with their own starting money, around the clock
+(Alpaca crypto feed, pairs set with `CRYPTO_SYMBOLS`; leave it empty to switch crypto off).
+
+- **Quantities:** fractions of a coin down to 0.000001. Internally each order is a whole number of
+  such units, so every broker guarantee (ask/bid fills, quoted size, no negative cash) applies unchanged.
+- **Fees:** 0.25% of every fill (Alpaca crypto tier 1, taker; read 2026-11-16), no flat commission.
+- **Tax:** 33% on realised gains (Italian rate from 2026), 0.2% a year stamp duty. Crypto losses are
+  kept in their own bucket and only offset later crypto gains. Confirm the loss rules with your
+  accountant: the sources checked agree on the rate but do not spell out loss compensation.
+- **Benchmark:** buy & hold Bitcoin. The crypto AI trader is compared with that, not with the S&P 500.
+- **Cost of thinking:** the crypto AI trader looks every 30 minutes, day and night
+  (`CRYPTO_AGENT_INTERVAL_MINUTES`). At about 3 cents a look that is roughly 1.40 USD a day.
+- **Not for crypto:** stock-only inputs (SEC filings, options, corporate actions, the stock screener).
 
 ## Known limits (read before trusting a result)
 

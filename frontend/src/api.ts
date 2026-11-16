@@ -18,6 +18,7 @@ export interface Status {
 }
 export interface StrategyRow {
   id: string; name: string; description: string; is_llm: boolean; active: boolean; thinking: boolean;
+  market: "stocks" | "crypto"; is_benchmark: boolean;
   net_result: number; gross_result: number; net_liquidation: number; equity: number; cash: number; deposits: number; dividends: number;
   positions: number; open_orders: number;
   costs: { commissions: number; taxes: number; tokens: number; stamp_duty: number; exit_costs_if_sold_now: number };
@@ -38,7 +39,7 @@ export interface Activity {
   symbol?: string; side?: string; qty?: number; price?: number; commission?: number; tax?: number;
   realized_gain?: number | null; rationale?: string; summary?: string; confidence?: number; wakes?: string[];
   news?: { id: string; headline: string; source: string; url: string; recv_ts: string }[];
-  quote?: { bid: string; ask: string; source: string; recv_ts: string }; by_risk_manager?: boolean; by_exit_plan?: boolean;
+  quote?: { bid: string; ask: string; source: string; recv_ts: string }; by_risk_manager?: boolean; by_exit_plan?: boolean; pieces?: number;
   orders?: number; thinking_ms?: number; token_cost?: number; models?: string[]; error?: string;
   reason?: string; unfilled_qty?: number; amount?: number; detail?: Record<string, unknown>;
 }
@@ -55,7 +56,7 @@ export interface Position {
 export interface Detail { id: string; exit_plans: Record<string, { take_profit: string | null; stop_loss: string | null }>; positions: Position[]; open_orders: Record<string, unknown>[]; alerts: Record<string, unknown>[]; tax_loss_credit: number }
 export interface QuoteRow {
   symbol: string; name: string; core: boolean; bid: number | null; ask: number | null; bid_size: number | null;
-  ask_size: number | null; source: string | null; received_at_utc: string | null; age_seconds: number | null;
+  ask_size: number | null; crypto?: boolean; source: string | null; received_at_utc: string | null; age_seconds: number | null;
   fresh: boolean; halted: boolean;
 }
 export interface Report {
@@ -138,6 +139,8 @@ export const usd = (v: number, digits = 2) =>
 export const signed = (v: number, digits = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + usd(Math.abs(v), digits);
 export const pct = (v: number | null | undefined, digits = 2) =>
   v == null ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(digits) + "%";
+/** Shares are whole numbers; coins can be fractions. */
+export const amount = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(v < 1 ? 6 : 4).replace(/0+$/, "").replace(/\.$/, ""));
 export const clock = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleTimeString() : "never");
 export const dateTime = (iso: string) => new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 export function ago(iso: string | null | undefined, now = Date.now()): string {
@@ -152,6 +155,6 @@ export function ago(iso: string | null | undefined, now = Date.now()): string {
 // Colour follows the strategy, never its rank (validated 6-series palette for dark surfaces).
 const SERIES: Record<string, string> = {
   llm_light: "#3987e5", tradingagents: "#d95926", buy_hold: "#199e70", momentum: "#c98500",
-  mean_reversion: "#d55181", random: "#0ca30c", technical_rules: "#9085e9",
+  mean_reversion: "#d55181", random: "#0ca30c", technical_rules: "#9085e9", crypto_ai: "#e66767", crypto_buy_hold: "#8b95a8",
 };
 export const seriesColor = (id: string) => SERIES[id] ?? "#9085e9";

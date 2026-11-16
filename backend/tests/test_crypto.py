@@ -117,3 +117,106 @@ def test_valuation_of_crypto_includes_percentage_exit_fee_and_33_percent_tax():
     # exit fee 3.30; gain 1320 - 3.30 - 1203 = 113.70; tax 37.53
     assert v["exit_costs"] == D("3.30") + D("37.53")
     assert v["equity"] == D("5000") - 1203 + 1320
+
+
+# ---------------------------------------------------------------- through the engine
+import asyncio
+import json
+from datetime import timedelta
+
+from test_engine import ASSETS, OPEN, EngineRig, FakeLLM
+from tradelab.ingest.alpaca import parse_crypto_bar, parse_crypto_quote
+from tradelab.strategies.crypto import CryptoAITrader, CryptoBuyAndHold
+
+
+class CryptoRig(EngineRig):
+    def __init__(self, tmp_path, strategies, llm=None, weekend=True):
+        self._strategies = strategies
+        super().__init__(tmp_path, strategies=strategies, llm=llm)
+        if weekend:
+            self.now = OPEN + timedelta(days=5, hours=3)          # Saturday: the stock market is closed
+        self.market.crypto_assets = {"BTC/USD": {"name": "Bitcoin"}, "ETH/USD": {"name": "Ethereum"}}
+        self.engine.crypto = ["BTC/USD", "ETH/USD"]
+
+    def factory(self, kind, sim):
+        if kind == "crypto_buy_hold":
+            return CryptoBuyAndHold()
+        if kind == "crypto_ai":
+            return CryptoAITrader(self.llm, "claude-haiku-5-5", "claude-opus-5-5", 30)
+        return super().factory(kind, sim)
+
+    def cq(self, pair, bid, ask, size="2.5"):
+        self.now += timedelta(seconds=1)
+        self.engine.on_quote(parse_crypto_quote({"S": pair, "bp": bid, "bs": size, "ap": ask, "as": size}, self.now, "test"))
+
+
+def test_feed_conversion_to_units_is_exact_and_sizes_round_down():
+    from datetime import datetime, timezone
+    t = datetime(2026, 11, 16, tzinfo=timezone.utc)
+    q = parse_crypto_quote({"S": "ETH/USD", "bp": "1818.58", "bs": "0.1002349", "ap": "1819.1", "as": "0.066113"}, t, "x")
+    assert q.bid == D("0.00181858") and q.ask == D("0.0018191") and q.bid_size == 100_234 and q.ask_size == 66_113
+    assert q.bid * 1_000_000 == D("1818.58")                      # one coin costs exactly what the feed said
+    b = parse_crypto_bar({"S": "ETH/USD", "o": 1800, "h": 1820, "l": 1790, "c": 1810.5, "t": "x"}, t)
+    assert b["c"] == D("0.0018105") and parse_crypto_quote({"S": "ETH/USD"}, t, "x") is None
+
+
+def test_bitcoin_buy_and_hold_runs_on_a_weekend_and_spends_all_cash(tmp_path):
+    r = CryptoRig(tmp_path, "crypto_buy_hold")
+    assert not r.market.is_open(r.now)
+    r.cq("BTC/USD", "59990", "60000")
+    d = r.step("crypto_buy_hold")
+    assert d.orders[0].symbol == "BTC/USD"
+    r.cq("BTC/USD", "59995", "60005")
+    a = r.acct("crypto_buy_hold")
+    assert a.qty("BTC/USD") > 82_000 and D("0") <= a.cash < D("10")       # about 0.083 BTC for $5,000
+    assert a.commissions == a.traded_value * D("0.0025") and a.cash == D("5000") - a.traded_value - a.commissions
+    assert r.step("crypto_buy_hold") is None
+
+
+def test_crypto_ai_trader_talks_in_coins_and_trades_in_units_with_exits(tmp_path):
+    reply = json.dumps({"summary": "ETH is breaking out.", "orders": [
+        {"action": "buy", "pair": "eth/usd", "quantity": 0.5, "take_profit_price": 2100, "stop_loss_price": 1950, "rationale": "r"},
+        {"action": "buy", "pair": "DOGE/USD", "quantity": 100}], "notes": "thesis", "next_wake_minutes": 20})
+    llm = FakeLLM([reply])
+    r = CryptoRig(tmp_path, "crypto_buy_hold,crypto_ai", llm=llm)
+    r.cq("ETH/USD", "1999", "2000")
+    r.cq("BTC/USD", "59990", "60000")
+    d = r.step("crypto_ai")
+    state = json.loads(llm.calls[0][2])
+    assert state["quotes"]["ETH/USD"]["ask"] == 2000.0 and state["quotes"]["ETH/USD"]["ask_size_coins"] == 2.5
+    assert state["benchmark"]["buy_and_hold_bitcoin_net_result"] == 0.0
+    assert d.detail["orders_skipped"] == ["DOGE/USD"]                    # not a followed pair
+    r.cq("ETH/USD", "2000", "2001")
+    a = r.acct("crypto_ai")
+    assert a.qty("ETH/USD") == 500_000                                   # 0.5 ETH
+    assert a.commissions == D("1000.5") * D("0.0025")
+    plan = r.engine.state.exit_plans["crypto_ai:ETH/USD"]
+    assert D(plan["take_profit"]) == D("2100") * D("0.000001")
+    r.cq("ETH/USD", "2101", "2102")                                      # take-profit reached...
+    r.cq("ETH/USD", "2101", "2102")                                      # ...sold on the next quote, no model call
+    assert a.positions == {} and len(llm.calls) == 1
+    sell = r.ledger.entries(r.engine.sim["id"], ("fill",), "crypto_ai")[-1].payload
+    assert sell["tax_bucket"] == "crypto" and D(sell["tax"]) > 0
+
+
+def test_an_order_filled_in_pieces_wakes_the_trader_once_and_shows_as_one_row(tmp_path):
+    from tradelab.services import Services
+    reply = json.dumps({"summary": "buy", "orders": [{"action": "buy", "pair": "ETH/USD", "quantity": 1.0}]})
+    r = CryptoRig(tmp_path, "crypto_ai", llm=FakeLLM([reply]))
+    r.cq("ETH/USD", "1999", "2000")
+    r.step("crypto_ai")
+    runner = r.engine.runners["crypto_ai"]
+    while not runner.queue.empty():
+        runner.queue.get_nowait()
+    for _ in range(3):
+        r.cq("ETH/USD", "1999", "2000", size="0.3")                # three pieces of 0.3 ETH...
+    assert runner.queue.empty()                                    # ...no wake yet: the order is not complete
+    r.cq("ETH/USD", "1999", "2002", size="0.3")                    # the last 0.1 ETH
+    assert [runner.queue.get_nowait()["reason"]] == ["fill"] and runner.queue.empty()
+    rows = [{"kind": "fill", "order_id": "o1", "qty": 0.1, "price": 2002.0, "commission": 0.5, "tax": 0.0, "seq": 4},
+            {"kind": "decision", "seq": 3},
+            {"kind": "fill", "order_id": "o1", "qty": 0.9, "price": 2000.0, "commission": 4.5, "tax": 0.0, "seq": 2}]
+    merged = Services._merge_fills(rows)
+    assert [m["kind"] for m in merged] == ["fill", "decision"]
+    assert merged[0]["pieces"] == 2 and abs(merged[0]["qty"] - 1.0) < 1e-12 and abs(merged[0]["price"] - 2000.2) < 1e-9
+    assert merged[0]["commission"] == 5.0

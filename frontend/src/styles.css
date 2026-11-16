@@ -107,3 +107,4 @@ details.verdict summary { cursor: pointer; } button:disabled { opacity: .5; curs
 @media (max-width: 820px) { .map-body { grid-template-columns: 1fr; } }
 .tickers { margin-top: 3px; color: #c9cfdb; line-height: 1.9; }
 button.big { font-size: 16px; padding: 10px 22px; font-weight: 600; }
+.tag.crypto { color: #f1d9a0; border-color: #7a5d1c; }

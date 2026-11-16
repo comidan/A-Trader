@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import {
   Activity, Crosscheck, Detail, NewsItem, Overview, QuoteRow, Report, Simulation, Status, StrategyRow,
-  ago, api, clock, dateTime, pct, seriesColor, signed, usd, usePoll,
+  ago, amount, api, clock, dateTime, pct, seriesColor, signed, usd, usePoll,
 } from "./api";
 
 export const Dot = ({ tone }: { tone: "ok" | "warn" | "bad" | "off" }) => <span className={`dot ${tone}`} />;
@@ -39,12 +39,12 @@ export function ActivityFeed({ refresh, strategy }: { refresh: number; strategy:
 function ActivityLine({ a }: { a: Activity }) {
   switch (a.kind) {
     case "fill":
-      return <>{a.side === "buy" ? "bought" : "sold"} <b>{a.qty} {a.symbol}</b> at {usd(a.price!)}
+      return <>{a.side === "buy" ? "bought" : "sold"} <b>{amount(a.qty!)} {a.symbol}</b> at {usd(a.price!)}{a.pieces && a.pieces > 1 ? " on average" : ""}
         {a.realized_gain != null && <> · result <Money v={a.realized_gain - (a.tax ?? 0)} /> after tax</>}</>;
     case "decision":
       return a.orders ? <>decided to trade</> : <>looked and did nothing</>;
     case "order_rejected":
-      return <>tried to {a.side} {a.qty} {a.symbol}: <span className="warn-text">refused</span></>;
+      return <>tried to {a.side} {amount(a.qty!)} {a.symbol}: <span className="warn-text">refused</span></>;
     case "order_cancelled": return <>order cancelled</>;
     case "order_expired": return <>order expired unfilled</>;
     case "cash_deposit": return <>added {usd(a.amount!)} of cash</>;
@@ -73,7 +73,9 @@ function ActivityBody({ a }: { a: Activity }) {
           <div key={n.id}><span className="muted">News it had seen:</span> {n.url ? <a href={n.url} target="_blank" rel="noreferrer">{n.headline}</a> : n.headline} <span className="muted">({n.source})</span></div>
         ))}
         <div className="muted small">
-          Fee {usd(a.commission!)}{a.tax ? ` · tax ${usd(a.tax)}` : ""}{woke && ` · woken by ${woke}`} · filled on quote {a.quote!.bid} / {a.quote!.ask} from {a.quote!.source}, received {clock(a.quote!.recv_ts)}
+          Fee {usd(a.commission!)}{a.tax ? ` · tax ${usd(a.tax)}` : ""}{woke && ` · woken by ${woke}`} · {a.pieces && a.pieces > 1
+            ? `filled in ${a.pieces} pieces as shares came on offer; last on quote`
+            : "filled on quote"} {a.quote!.bid} / {a.quote!.ask} from {a.quote!.source}, received {clock(a.quote!.recv_ts)}
         </div>
       </div>
     );
@@ -114,12 +116,12 @@ export function Holdings({ strategies, refresh }: { strategies: StrategyRow[]; r
         {d && d.tax_loss_credit > 0 && <span>Tax credit from past losses <b>{usd(d.tax_loss_credit)}</b></span>}</div>
       {!d ? <p className="muted">Loading…</p> : d.positions.length === 0 ? <p className="muted">Holding only cash right now.</p> : (
         <table>
-          <thead><tr><th>Stock</th><th className="num">Shares</th><th className="num">Paid (avg)</th><th className="num">Sell price now</th>
+          <thead><tr><th>Stock or coin</th><th className="num">Amount</th><th className="num">Paid (avg)</th><th className="num">Sell price now</th>
             <th className="num">Last real trade</th><th className="num">Value</th><th className="num">Gain / loss</th><th>Automatic exit</th><th>Price from</th></tr></thead>
           <tbody>{d.positions.map((p) => (
             <tr key={p.symbol}>
               <td><b>{p.symbol}</b> <span className="muted">{p.name}</span>{p.halted && <span className="pill paused">halted</span>}</td>
-              <td className="num">{p.qty}</td><td className="num">{usd(p.avg_cost)}</td>
+              <td className="num">{amount(p.qty)}</td><td className="num">{usd(p.avg_cost)}</td>
               <td className="num">{p.bid != null ? usd(p.bid) : "—"}{p.spread_pct != null && p.spread_pct > 1 && <span className="warn-text small" title="The quote is unusually wide; the real market price is closer to the last trade."> wide {p.spread_pct.toFixed(1)}%</span>}</td>
               <td className="num">{p.last_trade != null ? usd(p.last_trade) : "—"}</td><td className="num">{p.value != null ? usd(p.value) : "—"}</td>
               <td className="num">{p.unrealized != null ? <Money v={p.unrealized} /> : "—"}</td>
@@ -133,7 +135,7 @@ export function Holdings({ strategies, refresh }: { strategies: StrategyRow[]; r
           <thead><tr><th>Waiting orders</th><th className="num">Shares</th><th>Type</th><th>Price</th></tr></thead>
           <tbody>{d.open_orders.map((o) => (
             <tr key={String(o.id)}><td>{String(o.side)} <b>{String(o.symbol)}</b></td>
-              <td className="num">{Number(o.qty) - Number(o.filled_qty)} of {String(o.qty)}</td><td>{String(o.type)} · {String(o.tif)}</td>
+              <td className="num">{amount(Number(o.qty) - Number(o.filled_qty))} of {amount(Number(o.qty))}</td><td>{String(o.type)} · {String(o.tif)}</td>
               <td>{String(o.limit_price ?? o.stop_price ?? "market")}</td></tr>))}</tbody>
         </table>
       )}

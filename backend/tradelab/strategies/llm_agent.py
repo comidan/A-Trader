@@ -238,12 +238,11 @@ class LLMLightAgent(Strategy):
             return Decision(summary="Daily token ceiling reached: no thinking until tomorrow.",
                             detail={"skipped": "token_budget"})
         reasons = {w["reason"] for w in ctx.wakes}
-        state = build_state(ctx)
+        state = self.build_state(ctx)
         calls: list[dict[str, Any]] = []
         # Its own schedule and the regular timer go straight to the decision model: an active trader scans
         # prices on a clock. Outside events (news, filings, moves, fills) pass through the cheap filter first.
-        direct = (ctx.last_decision_at is None or ctx.last_decision_at < ctx.session[0]
-                  or bool(reasons & {"scheduled", "timer", "simulation_started", "market_open"}))
+        direct = self.is_direct(ctx, reasons)
         if not direct:
             try:
                 t = await self.llm.chat(self.triage_model, TRIAGE_SYSTEM, json.dumps({
@@ -264,26 +263,39 @@ class LLMLightAgent(Strategy):
                 return Decision(summary=f"Checked the news, nothing worth acting on. {why}",
                                 detail={"triage": why, "llm_calls": calls, "escalated": False})
         try:
-            r = await self.llm.chat(self.decision_model,
-                                    DECISION_SYSTEM.format(
-                                        index_rule=("You may also hold index funds." if self.allow_index_funds else
-                                                    "You may not buy broad index funds (SPY, QQQ, VOO and similar): "
-                                                    "holding the benchmark is not trading. Individual stocks and "
-                                                    "sector or thematic funds are allowed."),
-                                        commission=ctx.profile.commission_per_order,
-                                        round_trip=ctx.profile.commission_per_order * 2,
-                                        pct_500=round(float(ctx.profile.commission_per_order) * 2 / 500 * 100, 1),
-                                        pct_2500=round(float(ctx.profile.commission_per_order) * 2 / 2500 * 100, 2)),
-                                    json.dumps(state), max_tokens=8000, purpose="decision")
+            r = await self.llm.chat(self.decision_model, self.system_prompt(ctx), json.dumps(state), max_tokens=8000,
+                                    purpose="decision")
         except LLMError as e:
             return Decision(summary="Decision call failed; holding.", detail={"error": str(e), "llm_calls": calls})
         ctx.charge_tokens(r.usage())
         calls.append(r.usage())
         try:
-            dec = LLMDecision.model_validate(extract_json(r.text))
+            dec = self.Reply.model_validate(extract_json(r.text))
         except (ValueError, ValidationError) as e:
             return Decision(summary="The model's reply was not valid; holding.",
                             detail={"invalid_reply": r.text[:2000], "error": str(e)[:500], "llm_calls": calls})
+        return self.to_decision(dec, ctx, calls, state)
+
+    # ---- hooks (the crypto trader overrides these)
+    Reply = LLMDecision
+
+    def build_state(self, ctx: Context) -> dict[str, Any]:
+        return build_state(ctx)
+
+    def is_direct(self, ctx: Context, reasons: set[str]) -> bool:
+        return (ctx.last_decision_at is None or (ctx.session is not None and ctx.last_decision_at < ctx.session[0])
+                or bool(reasons & {"scheduled", "timer", "simulation_started", "market_open"}))
+
+    def system_prompt(self, ctx: Context) -> str:
+        fee = ctx.profile.commission_per_order
+        return DECISION_SYSTEM.format(
+            index_rule=("You may also hold index funds." if self.allow_index_funds else
+                        "You may not buy broad index funds (SPY, QQQ, VOO and similar): holding the benchmark is not "
+                        "trading. Individual stocks and sector or thematic funds are allowed."),
+            commission=fee, round_trip=fee * 2, pct_500=round(float(fee) * 2 / 500 * 100, 1),
+            pct_2500=round(float(fee) * 2 / 2500 * 100, 2))
+
+    def to_decision(self, dec: Any, ctx: Context, calls: list[dict[str, Any]], state: dict[str, Any]) -> Decision:
         news_ids = [n["id"] for n in ctx.news[:40]]
         refused = [o.ticker.upper() for o in dec.orders
                    if o.action == "buy" and not self.allow_index_funds and o.ticker.upper() in INDEX_FUNDS]

@@ -21,11 +21,12 @@ from .engine import Engine
 from .feeds import FeedRegistry, FeedStatus
 from .graph import CompanyGraph
 from .ingest import news as news_mod
-from .ingest.alpaca import STREAM_HOST, AlpacaRest, AlpacaStream, parse_bar, parse_quote
+from .ingest.alpaca import STREAM_HOST, AlpacaRest, AlpacaStream, parse_bar, parse_crypto_bar, parse_crypto_quote, parse_quote
 from .llm import LLM
 from .market import NY, MarketState
 from .metrics import daily_index, daily_returns, strategy_metrics, weekly_report
-from .models import Quote
+from .models import CRYPTO_LOT, Quote, is_crypto
+from .strategies.crypto import CryptoAITrader, CryptoBuyAndHold
 from .simulations import Simulations
 from .storage.db import Database, Ledger
 from .storage.market_store import MarketStore
@@ -58,6 +59,7 @@ class Services:
         self.f_edgar = self.feeds.register(FeedStatus("sec_edgar", "SEC EDGAR latest filings (8-K, 10-Q, 10-K)"))
         self.f_rss = self.feeds.register(FeedStatus("world_news", "World news feeds (BBC, MarketWatch, Federal Reserve)"))
         self.f_gdelt = self.feeds.register(FeedStatus("gdelt", "GDELT world news (15-minute knowledge-graph files)"))
+        self.f_crypto = self.feeds.register(FeedStatus("alpaca_crypto", "Alpaca crypto websocket (quotes and 1-min bars, 24/7)"))
         self.f_ref = self.feeds.register(FeedStatus("alpaca_reference", "Alpaca trading calendar and asset list"))
         self.engine = Engine(settings, self.ledger, self.sims, self.bus, self.market, self.store, self.make_strategy)
         self.rest: AlpacaRest | None = None
@@ -94,6 +96,15 @@ class Services:
                     return None
             return LLMLightAgent(self.llm, s.llm_triage_model, s.llm_decision_model, s.llm_agent_interval_minutes,
                                  s.llm_allow_index_funds)
+        if kind == "crypto_buy_hold":
+            return CryptoBuyAndHold() if s.crypto_list else None
+        if kind == "crypto_ai":
+            if not s.crypto_list:
+                return None
+            if not self.llm.configured:
+                self.strategy_notes[kind] = "not running: ICA_API_KEY is missing"
+                return None
+            return CryptoAITrader(self.llm, s.llm_triage_model, s.llm_decision_model, s.crypto_agent_interval_minutes)
         if kind == "tradingagents":
             if not tradingagents_adapter.available():
                 self.strategy_notes[kind] = "not installed (build with INSTALL_TRADINGAGENTS=1)"
@@ -132,6 +143,12 @@ class Services:
             news_stream = AlpacaStream(f"{STREAM_HOST}/v1beta1/news", key, secret, self.f_news, self._on_news_message,
                                        lambda: {"news": ["*"]}, self._on_feed_state("alpaca_news"))
             self._spawn(news_stream.run())
+            if s.crypto_list:
+                crypto_stream = AlpacaStream(f"{STREAM_HOST}/v1beta3/crypto/us", key, secret, self.f_crypto, self._on_crypto_message,
+                                             lambda: {"quotes": s.crypto_list, "bars": s.crypto_list},
+                                             self._on_feed_state("alpaca_crypto"))
+                self._spawn(crypto_stream.run())
+                self._spawn(self._crypto_reference_loop())
             if s.paper_crosscheck:
                 self.mirror = PaperMirror(self.rest, self.store, lambda: (self.engine.sim or {}).get("id"))
                 self.engine.on_order = self.mirror.on_order
@@ -202,6 +219,41 @@ class Services:
         elif t == "s" and m.get("S"):
             self.engine.on_status(m["S"], str(m.get("sc", "")), str(m.get("sm", "")), str(m.get("rm", "")), recv_ts)
 
+    def _on_crypto_message(self, m: dict[str, Any], recv_ts: datetime) -> None:
+        t = m.get("T")
+        if t == "q":
+            q = parse_crypto_quote(m, recv_ts, "Alpaca crypto")
+            if q and q.symbol in self.market.crypto_assets:
+                self.engine.on_quote(q)
+            elif not q:
+                self._malformed(m)
+        elif t == "b" and m.get("S") in self.market.crypto_assets:
+            bar = parse_crypto_bar(m, recv_ts)
+            if bar:
+                self.engine.on_bar(m["S"], bar, "Alpaca crypto")
+
+    async def _crypto_reference_loop(self) -> None:
+        """Tradable crypto pairs and their daily history (prices stored per unit, like the live quotes)."""
+        while True:
+            wait = 6 * 3600
+            try:
+                wanted = set(self.settings.crypto_list)
+                self.market.crypto_assets = {a["symbol"]: {"name": a.get("name", "").split("/")[0].strip()}
+                                             for a in await self.rest.crypto_assets() if a["symbol"] in wanted and a.get("tradable")}
+                now = now_utc()
+                today = now.date().isoformat()
+                bars = await self.rest.crypto_daily_bars(sorted(self.market.crypto_assets), (now - timedelta(days=400)).date().isoformat())
+                done = {s: [b for b in rows if b["t"][:10] < today] for s, rows in bars.items()}
+                lot = float(CRYPTO_LOT)
+                self.market.set_daily({s: [float(b["c"]) * lot for b in rows] for s, rows in done.items()}, now_utc(),
+                                      {s: [{k: float(b[k]) * lot for k in "ohlc"} for b in rows] for s, rows in done.items()})
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                wait = 120
+                log.warning("crypto_reference_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
+            await asyncio.sleep(wait)
+
     def _malformed(self, m: dict[str, Any]) -> None:
         self.malformed += 1
         if self.malformed <= 20:
@@ -255,7 +307,7 @@ class Services:
         syms = set(self.engine.universe.symbols())
         for a in self.engine.state.accounts.values():
             syms |= set(a.positions)
-        return sorted(syms)
+        return sorted(x for x in syms if not is_crypto(x))
 
     async def _corporate_actions_loop(self) -> None:
         """Splits and dividends for every watched or held ticker: at start, every 2 hours and at each market open."""
@@ -429,6 +481,7 @@ class Services:
                 stale = [s for s in a.positions if e.market.fresh_quote(s, now) is None]
                 rows.append({
                     "id": sid, "name": meta["name"], "description": meta.get("description", ""), "is_llm": meta.get("is_llm", False),
+                    "market": "crypto" if sid.startswith("crypto_") else "stocks",
                     "active": sid in e.runners, "thinking": e.runners[sid].busy if sid in e.runners else False,
                     "net_result": float(v["net_result"]), "gross_result": float(v["gross_result"]),
                     "net_liquidation": float(v["net_liquidation"]), "equity": float(v["equity"]), "cash": float(v["cash"]),
@@ -439,9 +492,12 @@ class Services:
                     "prices_stale_for": stale if not e.market.is_open(now) else [], "prices_missing_for": v["unpriced"],
                     "suspended_positions": stale if e.market.is_open(now) else [],
                     **strategy_metrics(a, v, pts, starting)})
-            bh = next((r for r in rows if r["id"] == "buy_hold"), None)
+            bench = {"stocks": next((r for r in rows if r["id"] == "buy_hold"), None),
+                     "crypto": next((r for r in rows if r["id"] == "crypto_buy_hold"), None)}
             for r in rows:
-                r["vs_buy_hold_pct"] = r["return_pct"] - bh["return_pct"] if bh else None
+                b = bench[r["market"]]
+                r["vs_buy_hold_pct"] = r["return_pct"] - b["return_pct"] if b else None
+                r["is_benchmark"] = b is not None and r["id"] == b["id"]
             rows.sort(key=lambda r: r["net_result"], reverse=True)
         return {"simulation": sim, "market": e.market.describe(now), "strategies": rows, "blocked": e.state.blocked,
                 "frozen": {s: h["reason"] for s, h in e.market.halted.items() if h.get("message") == "Frozen by TradeLab"},
@@ -477,24 +533,44 @@ class Services:
                              "closed_trades": a.closed_trades, "winning_trades": a.winning_trades})
         return {"created_at_utc": iso(now_utc()), **weekly_report(rows)}
 
+    @staticmethod
+    def _shown(symbol: str, qty: Any = None, price: Any = None) -> tuple[float | None, float | None]:
+        """Quantity and price as a person reads them: shares and $/share, or coins and $/coin."""
+        lot = CRYPTO_LOT if is_crypto(symbol) else Decimal(1)
+        return (float(Decimal(str(qty)) * lot) if qty is not None else None,
+                float(Decimal(str(price)) / lot) if price is not None else None)
+
     def strategy_detail(self, sid: str) -> dict[str, Any]:
         e, now = self.engine, now_utc()
         a = e.state.accounts[sid]
         positions = []
         for sym, pos in a.positions.items():
             q = e.market.quotes.get(sym)
+            qty, avg = self._shown(sym, pos.qty, pos.avg_cost)
+            lt = e.market.last_trade(sym)
             positions.append({
-                "symbol": sym, "name": e.market.name(sym), "qty": pos.qty, "avg_cost": float(pos.avg_cost),
-                "bid": float(q.bid) if q else None, "value": float(pos.qty * q.bid) if q else None,
+                "symbol": sym, "name": e.market.name(sym), "qty": qty, "avg_cost": avg,
+                "bid": self._shown(sym, price=q.bid)[1] if q else None, "value": float(pos.qty * q.bid) if q else None,
                 "unrealized": float(pos.qty * q.bid - pos.basis) if q else None,
                 "price_source": q.source if q else None, "price_received_at_utc": iso(q.recv_ts) if q else None,
-                "last_trade": float(lt) if (lt := e.market.last_trade(sym)) is not None else None,
+                "last_trade": self._shown(sym, price=lt)[1] if lt is not None else None,
                 "spread_pct": float((q.ask - q.bid) / ((q.ask + q.bid) / 2) * 100) if q and q.valid() else None,
                 "price_is_fresh": bool(q and e.market.fresh_quote(sym, now)), "halted": e.market.is_halted(sym)})
+
+        def order_row(o) -> dict[str, Any]:
+            d = o.to_dict()
+            d["qty"], _ = self._shown(o.symbol, o.qty)
+            d["filled_qty"], _ = self._shown(o.symbol, o.filled_qty)
+            for k in ("limit_price", "stop_price"):
+                d[k] = self._shown(o.symbol, price=d[k])[1] if d[k] is not None else None
+            return d
+
+        def plan_row(p) -> dict[str, Any]:
+            return {k: (self._shown(p["symbol"], price=p[k])[1] if p.get(k) else None) for k in ("take_profit", "stop_loss")}
         return {"id": sid, "positions": positions,
-                "open_orders": [o.to_dict() for o in e.state.open_orders(sid)],
+                "open_orders": [order_row(o) for o in e.state.open_orders(sid)],
                 "alerts": [al for al in e.state.alerts.values() if al["strategy_id"] == sid],
-                "exit_plans": {p["symbol"]: p for p in e.state.exit_plans.values() if p["strategy_id"] == sid},
+                "exit_plans": {p["symbol"]: plan_row(p) for p in e.state.exit_plans.values() if p["strategy_id"] == sid},
                 "tax_loss_credit": float(a.loss_credit(e.market.tax_year(now)))}
 
     def activity(self, limit: int = 60, sid: str | None = None) -> list[dict[str, Any]]:
@@ -504,7 +580,7 @@ class Services:
         kinds = ("fill", "decision", "order_rejected", "order_cancelled", "order_expired", "cash_deposit", "kill_switch",
                  "settings_changed", "alert_triggered", "strategy_error", "split", "dividend", "corporate_action_unhandled",
                  "symbol_unblocked")
-        entries = self.ledger.entries(e.sim["id"], kinds, sid, limit=limit * 3, newest_first=True)
+        entries = self.ledger.entries(e.sim["id"], kinds, sid, limit=limit * 12, newest_first=True)
         news_ids: set[str] = set()
         out = []
         for en in entries:
@@ -513,12 +589,14 @@ class Services:
                                    "strategy": e.state.strategies.get(en.strategy_id or "", {}).get("name")}
             if en.kind == "fill":
                 meta = p.get("meta", {})
-                row.update(symbol=p["symbol"], side=p["side"], qty=p["qty"], price=float(p["price"]),
+                shown_qty, shown_price = self._shown(p["symbol"], p["qty"], p["price"])
+                row.update(symbol=p["symbol"], side=p["side"], qty=shown_qty, price=shown_price,
                            commission=float(p["commission"]), tax=float(p.get("tax", 0)),
                            realized_gain=float(p["realized_gain"]) if "realized_gain" in p else None,
                            rationale=meta.get("rationale"), summary=meta.get("summary"), confidence=meta.get("confidence"),
                            wakes=meta.get("wakes", []), news_ids=meta.get("news_ids", [])[:5],
-                           quote={"bid": p["quote"]["bid"], "ask": p["quote"]["ask"], "source": p["quote"]["source"],
+                           quote={"bid": self._shown(p["symbol"], price=p["quote"]["bid"])[1],
+                                  "ask": self._shown(p["symbol"], price=p["quote"]["ask"])[1], "source": p["quote"]["source"],
                                   "recv_ts": p["quote"]["recv_ts"]}, by_risk_manager=meta.get("source") == "risk_manager", by_exit_plan=meta.get("source") == "exit_plan")
                 news_ids |= set(row["news_ids"])
             elif en.kind == "decision":
@@ -531,7 +609,7 @@ class Services:
                            token_cost=sum(float(c["usd"]) for c in calls), models=[c["model"] for c in calls],
                            error=d.get("error"))
             elif en.kind == "order_rejected":
-                row.update(symbol=p["symbol"], side=p["side"], qty=p["qty"], reason=p["reason"],
+                row.update(symbol=p["symbol"], side=p["side"], qty=self._shown(p["symbol"], p["qty"])[0], reason=p["reason"],
                            rationale=(p.get("meta") or {}).get("rationale"))
             elif en.kind in ("order_cancelled", "order_expired"):
                 row.update(reason=p.get("reason"), unfilled_qty=p.get("unfilled_qty"))
@@ -548,9 +626,12 @@ class Services:
                 row.update(symbol=p["symbol"], reason=p.get("reason", "released by you"))
             else:
                 row.update(detail=p)
+            if en.kind == "fill":
+                row["order_id"] = p["order_id"]
             out.append(row)
-            if len(out) >= limit:
+            if len(out) >= limit * 6:
                 break
+        out = self._merge_fills(out)[:limit]
         if news_ids:
             marks = ",".join("?" * len(news_ids))
             titles = {r["id"]: r for r in self.store.query(f"SELECT id, headline, source, url, recv_ts FROM news WHERE id IN ({marks})", tuple(news_ids))}
@@ -599,14 +680,44 @@ class Services:
         return {"nodes": list(nodes.values()), "links": links, "generated_at_utc": iso(now),
                 "note": "Company relationships come from each company's latest annual report (10-K), read once by the AI."}
 
+    @staticmethod
+    def _merge_fills(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """An order filled in many small pieces is shown once: total quantity, average price, summed costs."""
+        out: list[dict[str, Any]] = []
+        by_order: dict[str, dict[str, Any]] = {}
+        for row in rows:                                   # newest first
+            oid = row.get("order_id")
+            if row["kind"] != "fill" or oid is None:
+                out.append(row)
+                continue
+            first = by_order.get(oid)
+            if first is None:
+                by_order[oid] = row
+                row["pieces"] = 1
+                row["_value"] = row["qty"] * row["price"]
+                out.append(row)
+                continue
+            first["pieces"] += 1
+            first["_value"] += row["qty"] * row["price"]
+            first["qty"] += row["qty"]
+            first["price"] = first["_value"] / first["qty"]
+            first["commission"] += row["commission"]
+            first["tax"] += row["tax"]
+            if row.get("realized_gain") is not None:
+                first["realized_gain"] = (first.get("realized_gain") or 0) + row["realized_gain"]
+        for row in out:
+            row.pop("_value", None)
+        return out
+
     def quotes(self) -> list[dict[str, Any]]:
         e, now = self.engine, now_utc()
         out = []
-        for sym in e.universe.symbols():
+        for sym in e.universe.symbols() + [c for c in e.crypto if c in e.market.crypto_assets]:
             q = e.market.quotes.get(sym)
-            out.append({"symbol": sym, "name": e.market.name(sym), "core": sym in e.universe.core,
-                        "bid": float(q.bid) if q else None, "ask": float(q.ask) if q else None,
-                        "bid_size": q.bid_size if q else None, "ask_size": q.ask_size if q else None,
+            crypto = is_crypto(sym)
+            out.append({"symbol": sym, "name": e.market.name(sym), "core": sym in e.universe.core or crypto, "crypto": crypto,
+                        "bid": self._shown(sym, price=q.bid)[1] if q else None, "ask": self._shown(sym, price=q.ask)[1] if q else None,
+                        "bid_size": self._shown(sym, q.bid_size)[0] if q else None, "ask_size": self._shown(sym, q.ask_size)[0] if q else None,
                         "source": q.source if q else None, "received_at_utc": iso(q.recv_ts) if q else None,
                         "age_seconds": (now - q.recv_ts).total_seconds() if q else None,
                         "fresh": bool(q and e.market.fresh_quote(sym, now)), "halted": e.market.is_halted(sym)})

@@ -12,7 +12,7 @@ function headline(o: Overview): { title: string; text: string; tone: "up" | "dow
   if (!sim) return { title: "Welcome", text: "Nothing is running yet. Press the button to give every strategy the same pretend money and let them trade on real, live prices. You can change the amount in Settings.", tone: "" };
   if (sim.state === "created") return { title: "Ready", text: "Press Start. Trading begins as soon as the US market is open.", tone: "" };
   const bh = o.strategies.find((s) => s.id === "buy_hold");
-  const ai = o.strategies.filter((s) => s.is_llm).sort((a, b) => b.net_result - a.net_result)[0];
+  const ai = o.strategies.filter((s) => s.is_llm && s.market === "stocks").sort((a, b) => b.net_result - a.net_result)[0];
   if (!ai) return { title: "No AI agent is running", text: Object.values(o.not_running)[0] ?? "Only the simple strategies are trading.", tone: "" };
   if (!bh || o.strategies.every((s) => s.fills === 0))
     return { title: "Waiting for the first trades", text: o.market.state === "open" ? "The market is open; the strategies are deciding." : "The US market is closed. Nothing trades until it opens.", tone: "" };
@@ -33,6 +33,7 @@ function Card({ s, rank }: { s: StrategyRow; rank: number }) {
       <div className="strat-head">
         <span className="rank">{rank}</span><b>{s.name}</b>
         <span className={`tag ${s.is_llm ? "ai" : ""}`}>{s.is_llm ? "AI" : "simple rule"}</span>
+        {s.market === "crypto" && <span className="tag crypto">crypto · 24/7</span>}
         {s.thinking && <span className="thinking">thinking…</span>}
       </div>
       <div className="net"><Money v={s.net_result} /></div>
@@ -40,7 +41,7 @@ function Card({ s, rank }: { s: StrategyRow; rank: number }) {
       <div className="strat-foot">
         <div className="muted small">
           Before costs {signed(s.gross_result)} · costs so far {usd(totalCosts)}
-          {s.id !== "buy_hold" && s.vs_buy_hold_pct != null && <><br />vs buy & hold {pct(s.vs_buy_hold_pct)}</>}
+          {!s.is_benchmark && s.vs_buy_hold_pct != null && <><br />vs {s.market === "crypto" ? "holding Bitcoin" : "buy & hold S&P 500"} {pct(s.vs_buy_hold_pct)}</>}
           {s.quote_gap >= 1 && <><br /><span className="warn-text" title="Holdings are valued at the quoted sell price. On the single-exchange feed that quote can sit well below the last real trade; this is that difference, not a trading loss.">
             {usd(s.quote_gap)} of this is the wide-quote gap, not a trading loss</span></>}
           {(s.suspended_positions.length > 0 || s.prices_missing_for.length > 0) && <><br /><span className="warn-text">No fresh price for {[...s.suspended_positions, ...s.prices_missing_for].join(", ")}</span></>}
@@ -68,6 +69,10 @@ export function App() {
   const baseline = sim ? Number(sim.starting_capital_usd) : 0;
   const names = Object.fromEntries(overview.strategies.map((s) => [s.id, s.name]));
   const h = headline(overview);
+  const cAi = overview.strategies.find((s) => s.id === "crypto_ai"), cBh = overview.strategies.find((s) => s.id === "crypto_buy_hold");
+  const cryptoLine = !cAi || !cBh ? "" : cAi.fills === 0 ? "the crypto AI trader has not traded yet (it runs day and night)."
+    : cAi.net_result >= cBh.net_result ? `the crypto AI trader is ${usd(cAi.net_result - cBh.net_result)} ahead of simply holding Bitcoin.`
+    : `the crypto AI trader is ${usd(cBh.net_result - cAi.net_result)} behind simply holding Bitcoin.`;
   const quotes = status.feeds.find((f) => f.id === "alpaca_quotes");
   const dataTone = stale ? "bad" : quotes?.state === "live" ? "ok" : quotes?.state === "connecting" ? "warn" : "bad";
   const toggle = (id: string) => setHidden((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -114,6 +119,7 @@ export function App() {
           <div className="eyebrow">Is the AI beating the market, after all costs?</div>
           <div className="hero-title">{h.title}</div>
           <div className="hero-text">{h.text}</div>
+          {cryptoLine && <div className="hero-text"><b>Crypto:</b> {cryptoLine}</div>}
         </div>
         {!sim && <button className="primary big" onClick={quickStart}>Start a simulation</button>}
         {sim?.state === "created" && <button className="primary big" onClick={() => api(`/api/simulations/${sim.id}/start`, { method: "POST" }).catch((e) => alert(e.message))}>Start</button>}

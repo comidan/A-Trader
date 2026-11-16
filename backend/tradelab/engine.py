@@ -19,7 +19,7 @@ from .bus import EventBus
 from .clock import iso, now_utc
 from .config import Settings
 from .market import NY, MarketState, Universe
-from .models import BrokerProfile, D, OrderRequest, Quote
+from .models import BrokerProfile, D, OrderRequest, Quote, is_crypto
 from .simulations import Simulations
 from .storage.db import Ledger
 from .storage.market_store import MarketStore
@@ -64,9 +64,10 @@ class Runner:
             except asyncio.TimeoutError:
                 wakes = [{"reason": "scheduled" if scheduled else "timer", "data": None, "at": iso(self.engine.clock())}]
                 self.next_wake_s = None
-            if not self.engine.running or not self.engine.market.is_open(self.engine.clock()):
+            if not self.engine.running or not (self.strategy.market == "crypto"
+                                               or self.engine.market.is_open(self.engine.clock())):
                 continue
-            if ({w["reason"] for w in wakes} == {"price_move"} and self.last_decision_at
+            if ({w["reason"] for w in wakes} <= {"price_move", "fill"} and self.last_decision_at
                     and self.engine.clock() - self.last_decision_at < PRICE_WAKE_MIN_GAP):
                 continue                              # it just looked: a price wobble does not justify paying again
             self.busy = True
@@ -88,6 +89,7 @@ class Engine:
         self.profile = BrokerProfile(name=settings.broker_name, commission_per_order=settings.broker_commission_usd)
         self.autostart = autostart
         self.universe = Universe(settings.core_list, settings.capacity)
+        self.crypto = settings.crypto_list
         self.sim: dict[str, Any] | None = None
         self.state = SimState()
         self.broker: SimBroker | None = None
@@ -180,7 +182,7 @@ class Engine:
     def emit(self, kind: str, payload: dict[str, Any], strategy_id: str | None = None) -> None:
         entry = self.ledger.append(self.sim["id"], kind, payload, strategy_id)
         apply_event(self.state, kind, strategy_id, payload)
-        if kind == "fill":
+        if kind == "fill" and payload.get("remaining_after", 0) == 0:      # one wake per completed order, not per partial fill
             if strategy_id in self.runners:
                 self.runners[strategy_id].wake("fill", {"ticker": payload["symbol"], "side": payload["side"],
                                                         "shares": payload["qty"], "price": payload["price"]})
@@ -322,7 +324,7 @@ class Engine:
     def on_bar(self, symbol: str, bar: dict[str, Any], source: str) -> None:
         self.market.on_bar(symbol, bar)
         self.store.add_bar(symbol, bar, source)
-        if self.running and self.broker and self.market.is_open(bar["recv_ts"]):
+        if self.running and self.broker and self.market.is_open_for(symbol, bar["recv_ts"]):
             self._check_stop(symbol, bar["c"], bar["recv_ts"])
 
     def on_status(self, symbol: str, code: str, message: str, reason: str, recv_ts: datetime) -> None:
@@ -338,7 +340,9 @@ class Engine:
         if item.get("impact") in ("medium", "high"):
             related = set(item.get("symbols", [])) | {l["symbol"] for l in item.get("links", [])}
             for sid, r in self.runners.items():
-                interesting = related & (set(self.universe.symbols()) | set(self.state.accounts[sid].positions))
+                watched = ({s.replace("/", "") for s in self.crypto} | set(self.crypto) if r.strategy.market == "crypto"
+                           else set(self.universe.symbols()))
+                interesting = related & (watched | set(self.state.accounts[sid].positions))
                 if r.strategy.wants_events and interesting:
                     r.wake("filing" if item["kind"] == "filing" else "news",
                            {"id": item["id"], "tickers": sorted(interesting)[:6], "headline": item["headline"][:160]})
@@ -348,6 +352,8 @@ class Engine:
     def _check_overnight_jump(self, q: Quote) -> None:
         """A price that moved more than 40% since the previous session with no known corporate action is not
         trusted: the symbol is frozen (no fills) until an action explains it or the operator releases it."""
+        if is_crypto(q.symbol):
+            return
         prev = self.market.quotes.get(q.symbol)
         session = self.market.session(q.recv_ts)
         if not prev or not session or prev.recv_ts >= session[0] or not q.valid() or not prev.valid():
@@ -438,10 +444,12 @@ class Engine:
                   | {p["symbol"] for p in self.state.exit_plans.values()})
         for a in self.state.accounts.values():
             pinned |= set(a.positions)
-        self.universe.pin(pinned)
+        self.universe.pin({s for s in pinned if not is_crypto(s)})        # crypto has its own feed, no slot limit
         self._notify_universe(before)
 
     def watch(self, symbol: str) -> tuple[bool, str]:
+        if is_crypto(symbol):
+            return (symbol in self.crypto), "" if symbol in self.crypto else "crypto pairs are set with CRYPTO_SYMBOLS"
         why = self.market.tradable(symbol)
         if why:
             return False, why
@@ -459,7 +467,11 @@ class Engine:
     def context(self, runner: Runner, wakes: list[dict[str, Any]], now: datetime) -> Context:
         sid = runner.sid
         since = iso(runner.last_decision_at) if runner.last_decision_at else iso(now - timedelta(hours=12))
-        symbols = set(self.universe.symbols()) | set(self.state.accounts[sid].positions)
+        crypto = runner.strategy.market == "crypto"
+        universe = list(self.crypto) if crypto else self.universe.symbols()
+        symbols = set(universe) | set(self.state.accounts[sid].positions)
+        if crypto:
+            symbols |= {s.replace("/", "") for s in universe}             # news tags crypto as BTCUSD
         news = self.store.news(limit=60, since=since, symbols=symbols) if runner.strategy.is_llm else []
         if runner.strategy.is_llm:                 # plus a few market-wide stories that name no company
             wide = [n for n in self.store.news(limit=200, since=since)
@@ -489,11 +501,11 @@ class Engine:
             if self.relations:
                 relations = {s: g for s in symbols if (g := self.relations(s))}
         return Context(now, sid, wakes, self.state.accounts[sid], self.value(sid), self.broker.available_cash(sid),
-                       self.market, self.universe.symbols(), self.state.open_orders(sid),
+                       self.market, universe, self.state.open_orders(sid),
                        [a for a in self.state.alerts.values() if a["strategy_id"] == sid], news, self.profile,
                        self.market.session(now), runner.last_decision_at, D(self.sim["starting_capital_usd"]),
                        charge, budget_left, runner.notes, trades, relations,
-                       self.value("buy_hold")["net_result"] if "buy_hold" in self.state.accounts else None,
+                       self.value(bench)["net_result"] if (bench := "crypto_buy_hold" if crypto else "buy_hold") in self.state.accounts else None,
                        [p for p in self.state.exit_plans.values() if p["strategy_id"] == sid], list(runner.lessons))
 
     async def step(self, runner: Runner, wakes: list[dict[str, Any]]) -> Decision | None:
@@ -564,7 +576,8 @@ class Engine:
                 self.broker.expire_day_orders()
                 self._accrue_stamp_duty(now)
                 self.snapshot_equity(now)
-            if self.running and is_open and (self._last_snapshot is None or now - self._last_snapshot >= timedelta(seconds=60)):
+            trading_now = is_open or any(r.strategy.market == "crypto" for r in self.runners.values())
+            if self.running and trading_now and (self._last_snapshot is None or now - self._last_snapshot >= timedelta(seconds=60)):
                 self.snapshot_equity(now)
         self._was_open = is_open
         if is_open and watched_feed_ok:

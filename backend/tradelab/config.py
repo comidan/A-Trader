@@ -31,7 +31,11 @@ class Settings(BaseSettings):
     core_symbols: str = "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AVGO,JPM,V,UNH,XOM,LLY,WMT,COST,AMD,NFLX,BAC"
     stream_capacity: int = 0          # 0 = automatic: 30 on iex, 400 on sip
     quote_stale_seconds: float = 120
-    strategies: str = "buy_hold,random,momentum,mean_reversion,technical_rules,llm_light,tradingagents"
+    strategies: str = ("buy_hold,random,momentum,mean_reversion,technical_rules,llm_light,tradingagents,"
+                       "crypto_buy_hold,crypto_ai")
+    # Crypto pairs followed (Alpaca, 24/7). Leave empty to switch crypto off.
+    crypto_symbols: str = "BTC/USD,ETH/USD,SOL/USD,LTC/USD,BCH/USD,LINK/USD,AVAX/USD,AAVE/USD,UNI/USD,DOT/USD,XRP/USD,DOGE/USD"
+    crypto_agent_interval_minutes: float = 30   # the crypto AI trader runs day and night: each look costs about 3 cents
 
     llm_triage_model: str = "claude-haiku-5-5"
     llm_decision_model: str = "claude-opus-5-5"
@@ -68,6 +72,10 @@ class Settings(BaseSettings):
     @property
     def rss_feeds(self) -> dict[str, str]:
         return dict(pair.split("=", 1) for pair in self.world_news_feeds.split(",") if "=" in pair)
+
+    @property
+    def crypto_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.crypto_symbols.split(",") if s.strip()]
 
     @property
     def core_list(self) -> list[str]:

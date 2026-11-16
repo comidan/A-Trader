@@ -22,7 +22,7 @@ import websockets
 
 from ..clock import iso, now_utc
 from ..feeds import FeedStatus
-from ..models import Quote
+from ..models import CRYPTO_LOT, Quote
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,24 @@ def parse_quote(m: dict[str, Any], recv_ts: datetime, source: str) -> Quote | No
     try:
         return Quote(m["S"], Decimal(str(m["bp"])), int(m["bs"]), Decimal(str(m["ap"])), int(m["as"]),
                      recv_ts, next_seq(recv_ts), source, m.get("t"))
+    except (KeyError, ValueError, ArithmeticError):
+        return None
+
+
+def parse_crypto_quote(m: dict[str, Any], recv_ts: datetime, source: str) -> Quote | None:
+    """Crypto quote in dollars per coin and coins -> price per unit and whole units (1 unit = 0.000001 coin).
+    Sizes are rounded DOWN to whole units."""
+    try:
+        return Quote(m["S"], Decimal(str(m["bp"])) * CRYPTO_LOT, int(Decimal(str(m["bs"])) / CRYPTO_LOT),
+                     Decimal(str(m["ap"])) * CRYPTO_LOT, int(Decimal(str(m["as"])) / CRYPTO_LOT),
+                     recv_ts, next_seq(recv_ts), source, m.get("t"))
+    except (KeyError, ValueError, ArithmeticError):
+        return None
+
+
+def parse_crypto_bar(m: dict[str, Any], recv_ts: datetime) -> dict[str, Any] | None:
+    try:
+        return {"t": m["t"], "recv_ts": recv_ts, **{k: Decimal(str(m[k])) * CRYPTO_LOT for k in "ohlc"}, "v": 0}
     except (KeyError, ValueError, ArithmeticError):
         return None
 
@@ -89,6 +107,23 @@ class AlpacaRest:
                 if not token:
                     break
         return out
+
+    async def crypto_assets(self) -> list[dict[str, Any]]:
+        return await self._get(f"{PAPER_HOST}/v2/assets", status="active", asset_class="crypto")
+
+    async def crypto_daily_bars(self, symbols: list[str], start: str) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        token = None
+        while True:
+            params = {"symbols": ",".join(symbols), "timeframe": "1Day", "start": start, "limit": 10000}
+            if token:
+                params["page_token"] = token
+            body = await self._get(f"{DATA_HOST}/v1beta3/crypto/us/bars", **params)
+            for sym, bars in (body.get("bars") or {}).items():
+                out.setdefault(sym, []).extend(bars)
+            token = body.get("next_page_token")
+            if not token:
+                return out
 
     async def recent_news(self, symbols: list[str], start: str, limit: int = 50) -> list[dict[str, Any]]:
         """Recent real articles over REST, to fill the gap after a restart. Same fields as the news stream."""

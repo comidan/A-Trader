@@ -25,7 +25,7 @@ class Context:
     alerts: list[dict[str, Any]]
     news: list[dict[str, Any]]            # received since this strategy's previous decision
     profile: BrokerProfile
-    session: tuple[datetime, datetime]
+    session: tuple[datetime, datetime] | None     # None while the stock market is closed (crypto keeps running)
     last_decision_at: datetime | None
     starting_cash: Decimal
     charge_tokens: Callable[[dict[str, Any]], None]     # records an LLM call's cost against this account, immediately
@@ -60,6 +60,7 @@ class Strategy:
     name = "Strategy"
     description = ""
     is_llm = False
+    market = "stocks"                         # "crypto" strategies run around the clock
     interval_s: float = 60.0
     wants_events = False
 
