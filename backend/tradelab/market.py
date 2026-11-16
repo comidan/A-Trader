@@ -34,6 +34,11 @@ class MarketState:
         self.daily: dict[str, list[float]] = {}        # adjusted daily closes, oldest first (completed days only)
         self.daily_received_at: datetime | None = None
         self.movers: dict[str, Any] = {}               # filtered screener snapshot, with its receive time
+        self.daily_ohlc: dict[str, list[dict[str, float]]] = {}
+        self.options: dict[str, dict[str, Any]] = {}   # option-implied move per ticker
+        self.social: dict[str, dict[str, Any]] = {}    # crowd sentiment per ticker
+        self.events: dict[str, dict[str, Any]] = {}    # next earnings date, analyst ratings (needs a Finnhub key)
+        self.rule_record: dict[str, Any] = {}          # backtest of the rule-based signals
 
     # ---- calendar
     def set_calendar(self, rows: list[dict[str, str]], fetched_at: datetime) -> None:
@@ -124,9 +129,24 @@ class MarketState:
     def on_bar(self, symbol: str, bar: dict[str, Any]) -> None:
         self.bars.setdefault(symbol, deque(maxlen=800)).append(bar)
 
-    def set_daily(self, closes: dict[str, list[float]], received_at: datetime) -> None:
+    def set_daily(self, closes: dict[str, list[float]], received_at: datetime,
+                  ohlc: dict[str, list[dict[str, float]]] | None = None) -> None:
         self.daily.update(closes)
+        self.daily_ohlc.update(ohlc or {})
         self.daily_received_at = received_at
+
+    def technical(self, symbol: str) -> dict[str, Any] | None:
+        """Indicators on completed days plus today's last real trade as the provisional close."""
+        from .signals import indicators
+        bars, last = self.daily_ohlc.get(symbol), self.last_trade(symbol)
+        closes = list(self.daily.get(symbol) or [])
+        if last is not None:
+            closes.append(float(last))
+        if len(closes) < 60:
+            return None
+        highs = [b["h"] for b in bars] if bars else None
+        lows = [b["l"] for b in bars] if bars else None
+        return indicators(closes, highs, lows)
 
     def history(self, symbol: str) -> dict[str, float] | None:
         """Past performance from completed daily bars (no value from today, nothing from the future)."""

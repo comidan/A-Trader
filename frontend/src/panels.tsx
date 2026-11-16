@@ -378,6 +378,13 @@ export function SettingsPanel({ overview, sims, reload }: { overview: Overview; 
 }
 
 // ------------------------------------------------------------------ tools
+interface RuleRecord {
+  record: { rules?: Record<string, { description: string; trades: number; stocks_tested: number; win_rate_pct: number | null;
+    average_net_pct_per_trade: number | null; total_net_usd: number | null; average_days_held: number | null }>;
+    note?: string; sp500_over_the_tested_period_pct?: number; tested_trading_days?: number };
+  lessons: Record<string, string[]>;
+  research: { options: number; crowd: number; calendar: number; finnhub_key_set: boolean };
+}
 interface ReplayResult { label: string; events_replayed: number; strategies: { id: string; name: string; net_result: string; gross_result: string; fills: number; costs: string }[] }
 interface LedgerRow { seq: number; recorded_at_utc: string; kind: string; strategy_id: string | null; payload: Record<string, unknown>; hash: string }
 
@@ -390,6 +397,7 @@ export function Tools({ overview, refresh }: { overview: Overview; refresh: numb
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [ledger] = usePoll<LedgerRow[]>(`/api/ledger?limit=20${overview.simulation ? `&sim_id=${overview.simulation.id}` : ""}`, [refresh], 20000);
   const [open, setOpen] = useState<number | null>(null);
+  const [rules] = usePoll<RuleRecord>("/api/rules", [refresh], 60000);
   const replay = async () => {
     setBusy(true); setMsg(null); setResult(null);
     try { setResult(await api<ReplayResult>("/api/replay", { method: "POST", body: JSON.stringify({ start: `${day}T00:00:00+00:00`, end: `${day}T23:59:59+00:00` }) })); }
@@ -403,6 +411,33 @@ export function Tools({ overview, refresh }: { overview: Overview; refresh: numb
   return (
     <div className="stack">
       {msg && <p className={msg.ok ? "ok-text" : "error"}>{msg.text}</p>}
+      <div>
+        <h3>Rule-based signals: how they did in the past <span className="muted small">after commissions and tax</span></h3>
+        {!rules?.record.rules ? <p className="muted">Computed once the price history has loaded (needs the Alpaca keys).</p> : (
+          <>
+            <table>
+              <thead><tr><th>Rule</th><th className="num">Trades</th><th className="num">Winners</th><th className="num">Average per trade</th>
+                <th className="num">Total result</th><th className="num">Days held</th></tr></thead>
+              <tbody>{Object.entries(rules.record.rules).map(([name, r]) => (
+                <tr key={name}><td className="wrap"><b>{name.replace(/_/g, " ")}</b><br /><span className="muted small">{r.description}</span></td>
+                  <td className="num">{r.trades}</td><td className="num">{r.win_rate_pct == null ? "—" : `${r.win_rate_pct}%`}</td>
+                  <td className="num">{r.average_net_pct_per_trade == null ? "—" : pct(r.average_net_pct_per_trade)}</td>
+                  <td className="num">{r.total_net_usd == null ? "—" : <Money v={r.total_net_usd} />}</td>
+                  <td className="num">{r.average_days_held ?? "—"}</td></tr>))}</tbody>
+            </table>
+            <p className="muted small">Tested on {Object.values(rules.record.rules)[0]?.stocks_tested} followed stocks over {rules.record.tested_trading_days} trading days, $1,500 per trade.
+              The S&P 500 made {pct(rules.record.sp500_over_the_tested_period_pct)} over the same period. {rules.record.note}</p>
+          </>
+        )}
+        {rules && (
+          <p className="small">Research inputs the AI trader is receiving now: option-implied moves for {rules.research.options} stocks ·
+            crowd sentiment for {rules.research.crowd} · earnings dates and analyst ratings for {rules.research.calendar}
+            {!rules.research.finnhub_key_set && <span className="muted"> (add a free FINNHUB_API_KEY to .env to switch these on)</span>}</p>
+        )}
+        {rules && Object.entries(rules.lessons).map(([sid, list]) => (
+          <div key={sid} className="verdict"><b>Lessons the AI trader has written for itself</b>{list.map((l, i) => <p key={i} className="small">{l}</p>)}</div>
+        ))}
+      </div>
       <div>
         <h3>Follow another stock</h3>
         <div className="row">

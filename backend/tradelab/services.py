@@ -5,6 +5,10 @@ import asyncio
 import json
 import logging
 import uuid
+
+import httpx
+
+from . import __version__
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -26,6 +30,9 @@ from .simulations import Simulations
 from .storage.db import Database, Ledger
 from .storage.market_store import MarketStore
 from .strategies import tradingagents_adapter
+from .ingest import extras
+from .signals import track_record
+from .strategies.rules import TechnicalRules
 from .strategies.baselines import BuyAndHold, MeanReversion, Momentum, RandomTrader
 from .strategies.llm_agent import LLMLightAgent
 
@@ -75,6 +82,8 @@ class Services:
             return Momentum()
         if kind == "mean_reversion":
             return MeanReversion()
+        if kind == "technical_rules":
+            return TechnicalRules()
         if kind == "llm_light":
             if not self.llm.configured:
                 self.strategy_notes[kind] = "not running: ICA_API_KEY is missing"
@@ -114,6 +123,7 @@ class Services:
             self._spawn(self._corporate_actions_loop())
             self._spawn(self._history_loop())
             self._spawn(self._screener_loop())
+            self._spawn(self._extras_loop())
             self.engine.on_market_open = lambda: self._kick.set()
             self.quote_stream = AlpacaStream(f"{STREAM_HOST}/v2/{s.alpaca_feed}", key, secret, self.f_quotes,
                                              self._on_stock_message, self._channels, self._on_feed_state("alpaca_quotes"))
@@ -282,17 +292,61 @@ class Services:
                 log.warning("screener_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
             await asyncio.sleep(300)
 
+    async def _extras_loop(self) -> None:
+        """Option-implied moves, crowd sentiment and (with a Finnhub key) earnings dates and analyst ratings."""
+        key = self.settings.finnhub_api_key.get_secret_value()
+        last_finnhub = None
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": f"TradeLab/{__version__} (research reader)"}) as http:
+            while True:
+                try:
+                    now = now_utc()
+                    stocks = [s for s in self._tracked() if not self.market.is_etf(s)][:30]
+                    if key and (last_finnhub is None or now - last_finnhub > timedelta(hours=12)):
+                        try:
+                            for sym, data in (await extras.fetch_finnhub(http, key, stocks, now.astimezone(NY).date())).items():
+                                self.market.events[sym] = {**data, "received_at_utc": iso(now_utc())}
+                            last_finnhub = now
+                        except Exception as e:
+                            log.warning("finnhub_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
+                    if self.market.is_open(now):
+                        for sym in stocks:
+                            spot = self.market.last_trade(sym)
+                            try:
+                                if spot:
+                                    o = await extras.fetch_options(self.rest, sym, float(spot), now.astimezone(NY).date())
+                                    if o:
+                                        self.market.options[sym] = {**o, "received_at_utc": iso(now_utc())}
+                                if self.settings.social_sentiment:
+                                    m = await extras.fetch_stocktwits(http, sym)
+                                    if m:
+                                        self.market.social[sym] = {**m, "received_at_utc": iso(now_utc())}
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                log.warning("extras_failed", extra={"symbol": sym, "error": f"{type(e).__name__}: {e}"[:200]})
+                            await asyncio.sleep(2)             # stay far below both services' request limits
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("extras_loop_failed")
+                await asyncio.sleep(1200)
+
     async def _history_loop(self) -> None:
         """Adjusted daily closes (completed days only) so the agents can see each stock's recent past."""
         while True:
             wait = 6 * 3600
             try:
                 now = now_utc()
-                bars = await self.rest.daily_bars(self._tracked(), (now - timedelta(days=400)).date().isoformat(),
+                bars = await self.rest.daily_bars(self._tracked(), (now - timedelta(days=1100)).date().isoformat(),
                                                   (now - timedelta(minutes=20)).isoformat(timespec="seconds").replace("+00:00", "Z"))
                 today = now.astimezone(NY).date().isoformat()
-                closes = {s: [float(b["c"]) for b in rows if b["t"][:10] < today] for s, rows in bars.items()}
-                self.market.set_daily(closes, now_utc())
+                done = {s: [b for b in rows if b["t"][:10] < today] for s, rows in bars.items()}
+                closes = {s: [float(b["c"]) for b in rows] for s, rows in done.items()}
+                ohlc = {s: [{k: float(b[k]) for k in "ohlc"} for b in rows] for s, rows in done.items()}
+                self.market.set_daily(closes, now_utc(), ohlc)
+                self.market.rule_record = await asyncio.to_thread(
+                    track_record, ohlc, self.engine.profile.commission_per_order, self.engine.profile.capital_gains_tax_rate,
+                    {s for s in ohlc if self.market.is_etf(s)})
             except asyncio.CancelledError:
                 raise
             except Exception as e:

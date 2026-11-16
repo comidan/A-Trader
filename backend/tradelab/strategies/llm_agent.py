@@ -47,6 +47,13 @@ about half as far away is a normal short-term trade; size it so the move pays fo
 - Be decisive but selective: 2 to 4 positions at a time, each large enough that commissions do not eat the result. \
 Rotate out of a position when its reason is gone or something better appears. Sitting in cash is acceptable only \
 while you wait for a setup; say what you are waiting for.
+- Use the evidence beyond price. `technical` gives each stock's indicators and any rule-based `signals` firing now; \
+`rule_track_record` shows how those exact rules did over the past year after costs, so weigh a signal by its \
+record. `options` shows the move the options market is pricing and whether puts or calls dominate. `crowd` is \
+retail chatter (useful as a warning of crowded trades, rarely as a reason to buy). `calendar` gives the next \
+earnings date and analyst ratings when available: know whether you are holding through an earnings report.
+- When a trade has taught you something that will still be true next month, put it in `lesson` (one sentence). \
+Your lessons are shown to you at every decision.
 - Mind `spread_pct`. Quotes come from one exchange and can be several percent wide while the real price has not \
 moved. Never send a market order when the spread is above 0.3%: use a limit order close to `last_trade`. Prefer \
 heavily traded stocks, whose quotes are tight. A quote that jumps while `last_trade` stays put is noise.
@@ -82,6 +89,7 @@ Reply with JSON only, matching exactly:
  "exit_plans": [{{"ticker": "...", "take_profit_price": <number or null>, "stop_loss_price": <number or null>}}],
  "watch": ["..."],
  "notes": "<your trading journal for next time, up to 800 characters>",
+ "lesson": "<one durable lesson, or null>",
  "next_wake_minutes": <number between 1 and 1440, or null for the default>}}"""
 
 INDEX_FUNDS = {"SPY", "VOO", "IVV", "SPLG", "VTI", "ITOT", "QQQ", "QQQM", "DIA", "IWM", "RSP", "SCHX", "SCHB"}
@@ -122,6 +130,7 @@ class LLMDecision(BaseModel):
     exit_plans: list[LLMExitPlan] = []
     watch: list[str] = []
     notes: str | None = Field(default=None, max_length=2000)
+    lesson: str | None = Field(default=None, max_length=600)
     next_wake_minutes: float | None = Field(default=None, ge=1, le=1440)
 
 
@@ -150,6 +159,10 @@ def build_state(ctx: Context) -> dict[str, Any]:
             intra = ctx.market.intraday(sym, ctx.now)
             if intra:
                 quotes[sym]["intraday"] = intra
+            for key, value in (("technical", ctx.market.technical(sym)), ("options", ctx.market.options.get(sym)),
+                               ("crowd", ctx.market.social.get(sym)), ("calendar", ctx.market.events.get(sym))):
+                if value:
+                    quotes[sym][key] = {k: v for k, v in value.items() if k not in ("received_at_utc", "note")}
             hist = ctx.market.history(sym)
             if hist:
                 quotes[sym]["history"] = hist
@@ -192,8 +205,10 @@ def build_state(ctx: Context) -> dict[str, Any]:
         "market_movers": ctx.market.movers or None,
         "news_since_your_last_decision": news,
         "company_relationships": ctx.relations,
+        "rule_track_record": ctx.market.rule_record or None,
         "your_recent_trades": ctx.recent_trades,
         "your_notes": ctx.notes,
+        "your_lessons": ctx.lessons,
     }
 
 
@@ -284,6 +299,6 @@ class LLMLightAgent(Strategy):
                                           if o.action == "buy" and o.ticker.upper() not in refused]
                         + [(e.ticker.upper(), e.take_profit_price, e.stop_loss_price) for e in dec.exit_plans] if tp or sl],
             watch=[w.upper() for w in dec.watch][:10], next_wake_minutes=dec.next_wake_minutes, summary=dec.summary,
-            notes=dec.notes[:800] if dec.notes else None,
+            notes=dec.notes[:800] if dec.notes else None, lesson=dec.lesson[:300] if dec.lesson else None,
             detail={"llm_calls": calls, "escalated": True, "news_ids": news_ids, "state_seen": state,
                     **({"index_fund_buys_refused": refused} if refused else {})})

@@ -35,6 +35,7 @@ class Context:
     relations: dict[str, Any] = field(default_factory=dict)   # company graph for held / watched tickers
     benchmark_net_result: Decimal | None = None             # what buy & hold has made so far, same start
     exit_plans: list[dict[str, Any]] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)       # what the strategy told itself it had learned
 
     def quote(self, symbol: str) -> Quote | None:
         return self.market.fresh_quote(symbol, self.now)
@@ -50,6 +51,7 @@ class Decision:
     next_wake_minutes: float | None = None
     summary: str = ""
     notes: str | None = None                 # kept for the next decision
+    lesson: str | None = None                # added to the strategy's permanent list of lessons
     detail: dict[str, Any] = field(default_factory=dict)            # anything worth keeping in the ledger
 
 

@@ -45,6 +45,7 @@ class Runner:
         self.next_wake_s: float | None = None
         self.last_decision_at: datetime | None = None
         self.notes = ""
+        self.lessons: list[str] = []
         self.task: asyncio.Task | None = None
         self.busy = False
 
@@ -141,6 +142,8 @@ class Engine:
             noted = [e for e in self.ledger.entries(self.sim["id"], ("decision",), kind, limit=30, newest_first=True)
                      if e.payload.get("notes")]
             runner.notes = noted[0].payload["notes"] if noted else ""
+            runner.lessons = [e.payload["lesson"] for e in self.ledger.entries(self.sim["id"], ("decision",), kind)
+                              if e.payload.get("lesson")][-8:]
             self.runners[kind] = runner
         try:
             loop = asyncio.get_running_loop() if self.autostart else None
@@ -481,7 +484,7 @@ class Engine:
                        self.market.session(now), runner.last_decision_at, D(self.sim["starting_capital_usd"]),
                        charge, budget_left, runner.notes, trades, relations,
                        self.value("buy_hold")["net_result"] if "buy_hold" in self.state.accounts else None,
-                       [p for p in self.state.exit_plans.values() if p["strategy_id"] == sid])
+                       [p for p in self.state.exit_plans.values() if p["strategy_id"] == sid], list(runner.lessons))
 
     async def step(self, runner: Runner, wakes: list[dict[str, Any]]) -> Decision | None:
         started = self.clock()
@@ -504,12 +507,14 @@ class Engine:
                         "stop_price": str(o.stop_price) if o.stop_price else None, "tif": o.tif, **o.meta}
                        for o in decision.orders],
             "cancel": decision.cancel, "alerts": decision.alerts, "watch": decision.watch, "exit_plans": decision.exit_plans,
-            "next_wake_minutes": decision.next_wake_minutes, "notes": decision.notes,
+            "next_wake_minutes": decision.next_wake_minutes, "notes": decision.notes, "lesson": decision.lesson,
             "quotes_seen": {s: q for s, q in seen.items() if s in relevant}, "detail": decision.detail,
         }, sid)
         runner.last_decision_at = ready
         if decision.notes is not None:
             runner.notes = decision.notes
+        if decision.lesson:
+            runner.lessons = (runner.lessons + [decision.lesson])[-8:]
         for oid in decision.cancel:
             o = self.state.orders.get(oid)
             if o and o.strategy_id == sid:

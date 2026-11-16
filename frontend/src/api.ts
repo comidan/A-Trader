@@ -152,6 +152,6 @@ export function ago(iso: string | null | undefined, now = Date.now()): string {
 // Colour follows the strategy, never its rank (validated 6-series palette for dark surfaces).
 const SERIES: Record<string, string> = {
   llm_light: "#3987e5", tradingagents: "#d95926", buy_hold: "#199e70", momentum: "#c98500",
-  mean_reversion: "#d55181", random: "#0ca30c",
+  mean_reversion: "#d55181", random: "#0ca30c", technical_rules: "#9085e9",
 };
 export const seriesColor = (id: string) => SERIES[id] ?? "#9085e9";

@@ -576,3 +576,53 @@ def test_broker_fee_is_configurable(tmp_path):
     from tradelab.engine import Engine as E
     e = E(cheap, r.ledger, r.sims, EventBus(), r.market, r.store, r.factory)
     assert e.profile.commission_per_order == D("1") and e.profile.name == "Cheap broker"
+
+
+def test_rule_based_trader_buys_the_dip_near_the_close_and_sells_the_bounce(tmp_path):
+    from tradelab.strategies.rules import TechnicalRules
+    r = EngineRig(tmp_path)
+    r.factory = lambda kind, sim: TechnicalRules()
+    r.settings = r.settings.model_copy(update={"strategies": "technical_rules"})
+    sim = r.sims.create("rules", D("5000")); r.sims.transition(sim["id"], "start")
+    r.engine = r.new_engine()
+    up = [100 + i * 0.3 for i in range(230)]
+    r.market.set_daily({"AAPL": up + [up[-1] * 0.97], "MSFT": [300 - i * 0.2 for i in range(231)]}, r.now)
+    r.quote("AAPL", 158.9, 159.0); r.quote("MSFT", 250, 250.1)
+    bar(r, "AAPL", 159.0); bar(r, "MSFT", 250)                   # today's last trades: AAPL is down hard again
+    assert r.step("technical_rules") is None                      # too early in the day
+    r.now = OPEN + timedelta(hours=6, minutes=15)                 # 15 minutes before the close
+    r.quote("AAPL", 158.9, 159.0); r.quote("MSFT", 250, 250.1)
+    d = r.step("technical_rules")
+    assert [(o.symbol, o.side) for o in d.orders] == [("AAPL", "buy")]      # MSFT is in a downtrend: ignored
+    r.quote("AAPL", 159.0, 159.1)
+    assert r.acct("technical_rules").qty("AAPL") > 0
+    assert r.step("technical_rules") is None                      # once a day
+    r.engine.runners["technical_rules"].last_decision_at = None   # next day
+    bar(r, "AAPL", 175.0)                                         # bounced above the 5-day average
+    r.quote("AAPL", 174.9, 175.0)
+    d = r.step("technical_rules")
+    assert [(o.symbol, o.side) for o in d.orders] == [("AAPL", "sell")]
+
+
+def test_llm_agent_sees_indicators_rule_record_research_inputs_and_keeps_lessons(tmp_path):
+    first = json.dumps({"summary": "x", "orders": [], "lesson": "Chasing a gap up after news lost money twice."})
+    llm = FakeLLM([first, json.dumps({"summary": "y", "orders": []})])
+    r = EngineRig(tmp_path, strategies="llm_light", llm=llm)
+    up = [100 + i * 0.3 for i in range(230)]
+    r.market.set_daily({"AAPL": up + [up[-1] * 0.97]}, r.now)
+    r.market.options["AAPL"] = {"implied_move_pct": 2.3, "days": 4, "received_at_utc": "t"}
+    r.market.social["AAPL"] = {"bullish": 9, "bearish": 3, "bullish_share_pct": 75, "note": "n", "received_at_utc": "t"}
+    r.market.events["AAPL"] = {"next_earnings": {"date": "2026-11-19", "when": "after the market closes"}, "received_at_utc": "t"}
+    r.market.rule_record = {"rules": {"pullback_in_uptrend": {"trades": 40, "win_rate_pct": 62.5}}}
+    r.quote("AAPL", 158.9, 159.0)
+    bar(r, "AAPL", 159.0)
+    r.step("llm_light")
+    r.step("llm_light", reason="timer")
+    q = json.loads(llm.calls[1][2])["quotes"]["AAPL"]
+    assert q["technical"]["signals"] == ["pullback_in_uptrend"] and q["options"] == {"implied_move_pct": 2.3, "days": 4}
+    assert q["crowd"]["bullish_share_pct"] == 75 and "note" not in q["crowd"]
+    assert q["calendar"]["next_earnings"]["date"] == "2026-11-19"
+    state = json.loads(llm.calls[1][2])
+    assert state["rule_track_record"]["rules"]["pullback_in_uptrend"]["win_rate_pct"] == 62.5
+    assert state["your_lessons"] == ["Chasing a gap up after news lost money twice."]
+    assert r.new_engine().runners["llm_light"].lessons == ["Chasing a gap up after news lost money twice."]   # survives a restart

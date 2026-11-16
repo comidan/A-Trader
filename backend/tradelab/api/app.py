@@ -161,6 +161,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         svc.engine.release(symbol.upper())
         return {"released": symbol.upper()}
 
+    @app.get("/api/rules")
+    async def rules() -> dict[str, Any]:
+        return {"record": svc.market.rule_record,
+                "lessons": {sid: r.lessons for sid, r in svc.engine.runners.items() if r.lessons},
+                "research": {"options": len(svc.market.options), "crowd": len(svc.market.social), "calendar": len(svc.market.events),
+                             "finnhub_key_set": bool(settings.finnhub_api_key.get_secret_value())}}
+
     @app.get("/api/report")
     async def report() -> dict[str, Any]:
         return svc.report()

@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     core_symbols: str = "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AVGO,JPM,V,UNH,XOM,LLY,WMT,COST,AMD,NFLX,BAC"
     stream_capacity: int = 0          # 0 = automatic: 30 on iex, 400 on sip
     quote_stale_seconds: float = 120
-    strategies: str = "buy_hold,random,momentum,mean_reversion,llm_light,tradingagents"
+    strategies: str = "buy_hold,random,momentum,mean_reversion,technical_rules,llm_light,tradingagents"
 
     llm_triage_model: str = "claude-haiku-5-5"
     llm_decision_model: str = "claude-opus-5-5"
@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     broker_name: str = "Directa SIM (US market, regime amministrato)"
     llm_allow_index_funds: bool = False   # the AI trader must pick stocks, not buy the benchmark
     tradingagents_tickers: str = "NVDA,AAPL,MSFT"   # one multi-agent run per ticker per day
+    finnhub_api_key: SecretStr = SecretStr("")      # optional, free: earnings dates and analyst ratings
+    social_sentiment: bool = True                    # StockTwits crowd mood for followed stocks
     paper_crosscheck: bool = True
     dashboard_password: SecretStr = SecretStr("")   # if set, the dashboard and API ask for it (user: tradelab)
     ingest_enabled: bool = True       # tests switch live connections off

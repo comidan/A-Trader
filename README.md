@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 116 tests
+cd backend && pip install -e '.[dev]' && pytest          # 127 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -57,6 +57,7 @@ cd frontend && npm install && npm run dev                 # http://localhost:517
 | `random` | Random | Random buys and sells. |
 | `momentum` | Trend follower | Each afternoon holds the 3 biggest risers of the day. |
 | `mean_reversion` | Dip buyer | Each afternoon holds the 3 biggest fallers of the day. |
+| `technical_rules` | Rule-based trader | No AI: buys strong stocks after a sharp two-day drop, sells the bounce. Once a day. |
 | `llm_light` | AI trader | Cheap model triages events; one strong-model call decides; validated JSON. |
 | `tradingagents` | AI team | TradingAgents multi-agent run per ticker per day (optional). |
 
@@ -118,6 +119,12 @@ benchmark is not trading. At each decision it receives:
   the followed tickers and ask for any of them;
 - its positions with break-even prices, its recent trades with after-tax results, and its own
   trading journal (its only memory, stored in the ledger).
+
+It also receives technical indicators and the rule-based signals firing on each stock, with the
+past record of those rules after costs (Tools tab); the move priced by the options market and the
+put/call balance (Alpaca options data); StockTwits crowd sentiment; and, with a free
+`FINNHUB_API_KEY`, the next earnings date and analyst ratings. It can write durable lessons for
+itself, which are shown to it at every decision. Order-book depth is not available on these feeds.
 
 It is called on a clock (every 15 minutes by default) to scan prices, and by events in between.
 Every purchase can carry a take-profit and a stop: the engine then sells the instant either level is
