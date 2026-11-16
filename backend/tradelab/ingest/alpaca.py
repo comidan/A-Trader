@@ -180,7 +180,12 @@ class AlpacaStream:
                                 self._set("live", "subscribed")
                             elif t == "error":
                                 # 402 auth failed, 406 connection limit, 405 symbol limit, 409 insufficient subscription
-                                self._set("error", f"{m.get('code')}: {m.get('msg')}")
+                                hint = {406: " Alpaca allows one connection per account: another TradeLab or app is already "
+                                             "using these keys. Stop the other one; this one retries every 30 s.",
+                                        402: " Check ALPACA_API_KEY / ALPACA_API_SECRET in .env.",
+                                        409: " This Alpaca plan does not include the chosen feed (see ALPACA_FEED).",
+                                        405: " Too many tickers for this Alpaca plan."}.get(m.get("code"), "")
+                                self._set("error", f"{m.get('code')}: {m.get('msg')}.{hint}")
                                 log.error("feed_error", extra={"feed": self.status.id, "code": m.get("code"), "msg": m.get("msg")})
                                 if m.get("code") in (402, 406, 409):
                                     backoff = max(backoff, 30.0)

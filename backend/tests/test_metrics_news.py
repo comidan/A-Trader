@@ -4,7 +4,7 @@ from decimal import Decimal as D
 
 from tradelab.crosscheck import deviation_bps
 from tradelab.graph import CompanyGraph, business_section, clean_filing
-from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gdelt
+from tradelab.ingest.news import estimate_impact, finish, from_alpaca, parse_edgar_atom, parse_gdelt, parse_rss
 from tradelab.llm import cost_usd, extract_json, LLMError
 from tradelab.metrics import binomial_p, max_drawdown, sharpe, t_test_p, weekly_report
 from tradelab.storage.market_store import MarketStore
@@ -111,3 +111,19 @@ def test_weekly_report_significance_needs_consistent_outperformance():
     assert by["llm_light"]["significant"] is True and by["random"]["significant"] is False
     assert rep["headline"].startswith("Yes")
     assert "could be luck" in by["random"]["verdict"]
+
+
+def test_rss_and_atom_world_news_items():
+    rss = """<rss><channel><item><title>Tariffs on chips announced</title><link>https://x/1</link>
+      <pubDate>Mon, 16 Nov 2026 14:58:00 GMT</pubDate><description>&lt;p&gt;Details &lt;b&gt;here&lt;/b&gt;&lt;/p&gt;</description></item>
+      <item><title>No link</title></item></channel></rss>"""
+    items = parse_rss(rss, "BBC Business", T)
+    assert len(items) == 1
+    i = items[0]
+    assert (i["kind"], i["source"], i["headline"], i["summary"]) == ("world", "BBC Business", "Tariffs on chips announced", "Details here")
+    assert i["published_ts"] == "2026-11-16T14:58:00+00:00" and i["id"].startswith("rss:")
+    atom = """<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Fed statement</title>
+      <link href="https://fed/1"/><updated>2026-11-16T14:00:00Z</updated></entry></feed>"""
+    a = parse_rss(atom, "Federal Reserve", T)[0]
+    assert a["url"] == "https://fed/1" and a["published_ts"] == "2026-11-16T14:00:00+00:00"
+    assert parse_rss(rss, "x", T)[0]["id"] == i["id"]              # same link, same id: no duplicates

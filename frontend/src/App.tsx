@@ -9,7 +9,7 @@ type Tab = (typeof TABS)[number];
 
 function headline(o: Overview): { title: string; text: string; tone: "up" | "down" | "" } {
   const sim = o.simulation;
-  if (!sim) return { title: "Welcome", text: "Create a simulation in Settings to start. Each strategy gets the same amount of pretend money and trades on real, live prices.", tone: "" };
+  if (!sim) return { title: "Welcome", text: "Nothing is running yet. Press the button to give every strategy the same pretend money and let them trade on real, live prices. You can change the amount in Settings.", tone: "" };
   if (sim.state === "created") return { title: "Ready", text: "Press Start. Trading begins as soon as the US market is open.", tone: "" };
   const bh = o.strategies.find((s) => s.id === "buy_hold");
   const ai = o.strategies.filter((s) => s.is_llm).sort((a, b) => b.net_result - a.net_result)[0];
@@ -65,6 +65,12 @@ export function App() {
   const quotes = status.feeds.find((f) => f.id === "alpaca_quotes");
   const dataTone = stale ? "bad" : quotes?.state === "live" ? "ok" : quotes?.state === "connecting" ? "warn" : "bad";
   const toggle = (id: string) => setHidden((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const quickStart = async () => {
+    try {
+      const created = await api<Simulation>("/api/simulations", { method: "POST", body: JSON.stringify({ name: `Simulation ${new Date().toLocaleDateString()}` }) });
+      await api(`/api/simulations/${created.id}/start`, { method: "POST" });
+    } catch (e) { alert((e as Error).message); }
+  };
   const stopAll = () => {
     const on = !overview.kill_switch;
     if (on && !confirm("Stop all trading now? Open orders are cancelled and no new orders are accepted until you release it.")) return;
@@ -103,6 +109,8 @@ export function App() {
           <div className="hero-title">{h.title}</div>
           <div className="hero-text">{h.text}</div>
         </div>
+        {!sim && <button className="primary big" onClick={quickStart}>Start a simulation</button>}
+        {sim?.state === "created" && <button className="primary big" onClick={() => api(`/api/simulations/${sim.id}/start`, { method: "POST" }).catch((e) => alert(e.message))}>Start</button>}
         {sim && <div className="hero-side muted small">
           <div><b>{sim.name}</b> · <span className={`pill ${sim.state}`}>{sim.state}</span></div>
           <div>{usd(baseline, 0)} of pretend money per strategy</div>

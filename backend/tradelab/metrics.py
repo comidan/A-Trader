@@ -148,7 +148,9 @@ def weekly_report(rows: list[dict[str, Any]], benchmark: str = "buy_hold") -> di
             "win_rate_pct": r["winning_trades"] / r["closed_trades"] * 100 if r["closed_trades"] else None,
             "win_rate_p_value": binomial_p(r["winning_trades"], r["closed_trades"]), "verdict": verdict})
     agents = [x for x in out if x["is_llm"]]
-    if not agents:
+    if not rows:
+        headline = "No simulation yet: create one to start the comparison."
+    elif not agents:
         headline = "No AI agent is running."
     elif any(x["significant"] and (x["t_stat"] or 0) > 0 for x in agents):
         headline = "Yes: at least one AI agent beats buy & hold net of all costs, with statistical significance."

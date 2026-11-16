@@ -49,7 +49,8 @@ class Services:
         self.f_quotes = self.feeds.register(FeedStatus("alpaca_quotes", f"Alpaca {feed} websocket (quotes, 1-min bars, halts)"))
         self.f_news = self.feeds.register(FeedStatus("alpaca_news", "Alpaca news websocket (Benzinga and others)"))
         self.f_edgar = self.feeds.register(FeedStatus("sec_edgar", "SEC EDGAR latest filings (8-K, 10-Q, 10-K)"))
-        self.f_gdelt = self.feeds.register(FeedStatus("gdelt", "GDELT world news"))
+        self.f_rss = self.feeds.register(FeedStatus("world_news", "World news feeds (BBC, MarketWatch, Federal Reserve)"))
+        self.f_gdelt = self.feeds.register(FeedStatus("gdelt", "GDELT world news (optional extra)"))
         self.f_ref = self.feeds.register(FeedStatus("alpaca_reference", "Alpaca trading calendar and asset list"))
         self.engine = Engine(settings, self.ledger, self.sims, self.bus, self.market, self.store, self.make_strategy)
         self.rest: AlpacaRest | None = None
@@ -133,6 +134,8 @@ class Services:
                 self._spawn(self._graph_loop(sec))
         else:
             self.f_edgar.state, self.f_edgar.detail = "error", "SEC_USER_AGENT_EMAIL missing in .env (the SEC requires a contact)"
+        if s.rss_feeds:
+            self._spawn(news_mod.rss_loop(self.f_rss, self._on_item, s.rss_feeds, s.world_news_poll_seconds))
         self._spawn(news_mod.gdelt_loop(self.f_gdelt, self._on_item, s.gdelt_poll_seconds))
         self._spawn(self._report_loop())
 

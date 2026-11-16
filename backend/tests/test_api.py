@@ -61,6 +61,7 @@ def test_bus_prefix_filter_and_drop_on_full():
 def test_overview_shows_every_strategy_with_the_same_capital_and_no_invented_numbers(settings):
     with TestClient(create_app(settings)) as c:
         assert c.get("/api/overview").json()["strategies"] == []
+        assert c.get("/api/report").json()["headline"].startswith("No simulation yet")
         sim = c.post("/api/simulations", json={"name": "run"}).json()
         c.post(f"/api/simulations/{sim['id']}/start")
         o = c.get("/api/overview").json()

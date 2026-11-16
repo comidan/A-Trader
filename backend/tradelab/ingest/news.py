@@ -15,6 +15,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable
 
 import httpx
@@ -111,6 +112,57 @@ def parse_gdelt(body: dict[str, Any], recv_ts: datetime) -> list[dict[str, Any]]
     return out
 
 
+def parse_rss(xml_text: str, feed_name: str, recv_ts: datetime) -> list[dict[str, Any]]:
+    """RSS 2.0 or Atom items as world-news items. Anything without a title and a link is dropped."""
+    out = []
+    root = ET.fromstring(xml_text)
+    for e in list(root.iter("item")) + list(root.iter(f"{ATOM}entry")):
+        title = (e.findtext("title") or e.findtext(f"{ATOM}title") or "").strip()
+        link = (e.findtext("link") or "").strip()
+        if not link:
+            a = e.find(f"{ATOM}link")
+            link = a.get("href", "") if a is not None else ""
+        if not title or not link:
+            continue
+        pub = None
+        raw = e.findtext("pubDate") or e.findtext(f"{ATOM}updated") or e.findtext(f"{ATOM}published")
+        if raw:
+            try:
+                d = parsedate_to_datetime(raw) if "," in raw else datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                pub = (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
+            except (ValueError, TypeError):
+                pub = None
+        summary = re.sub(r"<[^>]+>", " ", e.findtext("description") or e.findtext(f"{ATOM}summary") or "")
+        out.append({"id": "rss:" + hashlib.sha1(link.encode()).hexdigest()[:20], "kind": "world", "source": feed_name,
+                    "recv_ts": iso(recv_ts), "published_ts": pub, "headline": title,
+                    "summary": " ".join(summary.split())[:400], "url": link, "symbols": []})
+    return out
+
+
+async def rss_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], bool], feeds: dict[str, str], poll_s: float) -> None:
+    """Public news feeds (RSS): the main source of world news. One failing feed does not stop the others."""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": f"TradeLab/{__version__} (news reader)"}) as http:
+        while True:
+            ok, failed = [], []
+            for name, url in feeds.items():
+                try:
+                    r = await http.get(url)
+                    r.raise_for_status()
+                    recv = now_utc()
+                    for item in parse_rss(r.text, name, recv):
+                        on_item(item)
+                    ok.append(name)
+                    status.last_received_at_utc = iso(recv)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    failed.append(name)
+                    log.warning("rss_poll_failed", extra={"feed_name": name, "error": f"{type(e).__name__}: {e}"[:200]})
+            status.state = "live" if ok else "error"
+            status.detail = f"{', '.join(ok) or 'no feed'} read every {int(poll_s / 60)} min" + (f"; not reachable: {', '.join(failed)}" if failed else "")
+            await asyncio.sleep(poll_s)
+
+
 class SecClient:
     """SEC fair-access: declared User-Agent with a contact address, well under 10 requests/second."""
 
@@ -176,8 +228,10 @@ async def gdelt_loop(status: FeedStatus, on_item: Callable[[dict[str, Any]], boo
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # GDELT limits by IP address and often refuses; asking again sooner only makes it worse.
                 status.state = "error"
-                status.detail = f"{type(e).__name__}: {e}"[:160] + " (GDELT throttles or refuses some networks; retrying every minute)"
+                status.detail = (f"GDELT refused the request ({type(e).__name__}: {e}"[:150] + "). Optional extra source: "
+                                 f"world news still arrives through the news feeds above. Next try in {int(poll_s / 60)} min.")
                 log.warning("gdelt_poll_failed", extra={"error": f"{type(e).__name__}: {e}"[:200]})
-                wait = min(poll_s, 60.0)
+                wait = poll_s
             await asyncio.sleep(wait)

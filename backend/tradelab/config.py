@@ -46,12 +46,22 @@ class Settings(BaseSettings):
     ingest_enabled: bool = True       # tests switch live connections off
     edgar_poll_seconds: float = 30
     gdelt_poll_seconds: float = 900
+    # World news: public RSS feeds as "Name=url" pairs separated by commas.
+    world_news_feeds: str = ("BBC Business=https://feeds.bbci.co.uk/news/business/rss.xml,"
+                             "BBC World=https://feeds.bbci.co.uk/news/world/rss.xml,"
+                             "MarketWatch=https://feeds.content.dowjones.io/public/rss/mw_topstories,"
+                             "Federal Reserve=https://www.federalreserve.gov/feeds/press_all.xml")
+    world_news_poll_seconds: float = 180
     log_level: str = "INFO"
     status_push_seconds: float = 2.0
 
     @property
     def llm_openai_base_url(self) -> str:
         return f"{self.ica_base_url.rstrip('/')}/{self.ica_namespace}"
+
+    @property
+    def rss_feeds(self) -> dict[str, str]:
+        return dict(pair.split("=", 1) for pair in self.world_news_feeds.split(",") if "=" in pair)
 
     @property
     def core_list(self) -> list[str]:

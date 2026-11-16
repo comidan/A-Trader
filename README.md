@@ -25,7 +25,9 @@ cp .env.example .env        # fill in the keys; .env is git-ignored
 docker compose up --build
 ```
 
-Open http://localhost:8080, create a simulation in **Settings**, press **Start**.
+Open http://localhost:8080 and press **Start a simulation**.
+
+Run only one TradeLab per Alpaca account: Alpaca allows a single streaming connection per key.
 
 Keys needed in `.env`:
 - `ALPACA_API_KEY` / `ALPACA_API_SECRET`: Alpaca **paper** account. Without them there are no prices, no market calendar and nothing trades.
@@ -42,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 102 tests
+cd backend && pip install -e '.[dev]' && pytest          # 103 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -77,7 +79,9 @@ moment of the call and see what their thinking has cost.
   Dividends: 15% US withholding, then 26% Italian tax on the remainder.
 - **LLM:** IBM Consulting Advantage, OpenAI-compatible. Token prices default to Anthropic list
   prices; set `LLM_PRICES` to what ICA charges you. A model without a price is refused.
-- **News:** Alpaca news stream (company news), SEC EDGAR latest-filings feed, GDELT (world news).
+- **News:** Alpaca news stream (company news), SEC EDGAR latest-filings feed, and public RSS feeds
+  for world news (BBC, MarketWatch, Federal Reserve; set `WORLD_NEWS_FEEDS` to change them). GDELT is
+  an optional extra: it limits by IP address and often refuses.
   "Impact" is a rule-based estimate, not a prediction.
 - **Company graph:** built once per core company by the cheap model from its latest 10-K, cached.
   Its cost is shown as a platform cost and is not charged to any strategy.
