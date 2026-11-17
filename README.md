@@ -44,7 +44,7 @@ To add the multi-agent strategy: `INSTALL_TRADINGAGENTS=1 docker compose up --bu
 ### Development
 
 ```bash
-cd backend && pip install -e '.[dev]' && pytest          # 140 tests
+cd backend && pip install -e '.[dev]' && pytest          # 143 tests
 uvicorn tradelab.main:app --reload                        # http://localhost:8000
 cd frontend && npm install && npm run dev                 # http://localhost:5173
 ```
@@ -109,8 +109,13 @@ hours and at each market open, for every followed or held ticker:
 
 ## What the AI trader sees and how it is told to work
 
-It is instructed as a professional active trader whose job is to beat the S&P 500 by buying and
-selling stocks. It may not buy broad index funds (`LLM_ALLOW_INDEX_FUNDS=false`): holding the
+It is instructed as an investor holding positions for days to weeks, judged against the S&P 500.
+It cannot be faster than the market, so its edge has to be understanding: second-order effects of
+news through suppliers, customers and competitors, what filings say about the coming quarters, how
+macro and regulatory news spreads across an industry. Every purchase needs a thesis, an expected
+holding period and wide exits (typically 6-20% take-profit, 5-10% stop). It looks every two hours
+(`LLM_AGENT_INTERVAL_MINUTES`) and whenever relevant news, a filing or a fill arrives. Each closed
+position is compared with holding the S&P 500 over the same days (Activity and Scorecard). It may not buy broad index funds (`LLM_ALLOW_INDEX_FUNDS=false`): holding the
 benchmark is not trading. At each decision it receives:
 
 - live quotes, with each stock's adjusted history and its performance against SPY over 20 and 60 days;
@@ -128,7 +133,7 @@ put/call balance (Alpaca options data); StockTwits crowd sentiment; and, with a 
 `FINNHUB_API_KEY`, the next earnings date and analyst ratings. It can write durable lessons for
 itself, which are shown to it at every decision. Order-book depth is not available on these feeds.
 
-It is called on a clock (every 15 minutes by default) to scan prices, and by events in between.
+It is called on a clock (every two hours by default) and by events in between.
 Every purchase can carry a take-profit and a stop: the engine then sells the instant either level is
 reached, with no model call. Take-profits trigger on the quoted bid; stops trigger on a real traded
 price, never on a quote that merely widened.

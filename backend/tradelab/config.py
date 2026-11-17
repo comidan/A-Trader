@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # rate may differ: override with LLM_PRICES='{"model": [in, out]}'. A model without a price is refused.
     llm_prices: dict[str, list[float]] = {"claude-haiku-5-5": [0.10, 0.50], "claude-sonnet-5-5": [2, 10],
                                           "claude-opus-5-5": [4, 20]}
-    llm_agent_interval_minutes: float = 15    # the AI trader scans the market on its own this often
+    llm_agent_interval_minutes: float = 120   # the stock AI trader's own regular look (events wake it in between)
     # Broker fee per executed order. 9 USD is Directa's US fee; change it to simulate a cheaper broker.
     broker_commission_usd: Decimal = Decimal("9")
     broker_name: str = "Directa SIM (US market, regime amministrato)"

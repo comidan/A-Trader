@@ -26,7 +26,7 @@ export interface StrategyRow {
   prices_stale_for: string[]; prices_missing_for: string[]; suspended_positions: string[];
   return_pct: number; gross_return_pct: number; max_drawdown_pct: number; sharpe: number | null; trading_days: number;
   win_rate_pct: number | null; closed_trades: number; orders: number; fills: number; turnover: number;
-  avg_cost_per_order: number | null; token_spend: number; vs_buy_hold_pct: number | null;
+  avg_cost_per_order: number | null; token_spend: number; bets_compared: number; bets_beating_index: number; vs_buy_hold_pct: number | null;
 }
 export interface Overview {
   simulation: Simulation | null; market: MarketInfo; strategies: StrategyRow[]; kill_switch: boolean;
@@ -40,6 +40,8 @@ export interface Activity {
   realized_gain?: number | null; rationale?: string; summary?: string; confidence?: number; wakes?: string[];
   news?: { id: string; headline: string; source: string; url: string; recv_ts: string }[];
   quote?: { bid: string; ask: string; source: string; recv_ts: string }; by_risk_manager?: boolean; by_exit_plan?: boolean; pieces?: number;
+  vs_benchmark?: { benchmark: string; position_return_pct: number; benchmark_return_pct: number } | null;
+  expected_holding_days?: number | null;
   orders?: number; thinking_ms?: number; token_cost?: number; models?: string[]; error?: string;
   reason?: string; unfilled_qty?: number; amount?: number; detail?: Record<string, unknown>;
 }

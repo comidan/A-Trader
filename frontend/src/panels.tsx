@@ -66,6 +66,15 @@ function ActivityBody({ a }: { a: Activity }) {
     return (
       <div className="feed-body">
         {a.rationale && <div><span className="muted">Why:</span> {a.rationale}</div>}
+        {a.side === "buy" && a.expected_holding_days && <div className="muted">Planned hold: about {a.expected_holding_days} days.</div>}
+        {a.vs_benchmark && (
+          <div>
+            <span className="muted">Against simply holding {a.vs_benchmark.benchmark === "SPY" ? "the S&P 500" : "Bitcoin"} over the same days:</span>{" "}
+            this bet {pct(a.vs_benchmark.position_return_pct)} after fees, the index {pct(a.vs_benchmark.benchmark_return_pct)}{" "}
+            {a.vs_benchmark.position_return_pct > a.vs_benchmark.benchmark_return_pct
+              ? <span className="up">· beat it</span> : <span className="down">· did worse</span>}
+          </div>
+        )}
         {a.summary && a.summary !== a.rationale && a.confidence != null && <div><span className="muted">Its plan:</span> {a.summary}</div>}
         {a.by_risk_manager && <div className="muted">Placed automatically by the safety settings.</div>}
         {a.by_exit_plan && <div className="muted">Sold automatically by the exit plan the trader had set. No thinking cost.</div>}
@@ -172,7 +181,9 @@ export function News({ refresh }: { refresh: number }) {
 const METRICS: [string, string, (s: StrategyRow) => string][] = [
   ["Net result", "What you would have gained or lost after selling everything and paying every cost.", (s) => `${signed(s.net_result)} (${pct(s.return_pct)})`],
   ["Before costs", "The same result ignoring fees, tax and AI cost. Shown only for comparison.", (s) => `${signed(s.gross_result)} (${pct(s.gross_return_pct)})`],
-  ["vs buy & hold", "Difference from simply buying the S&P 500 fund and waiting.", (s) => pct(s.vs_buy_hold_pct)],
+  ["vs buy & hold", "Difference from simply buying the index and waiting (the S&P 500 for stocks, Bitcoin for crypto).", (s) => pct(s.vs_buy_hold_pct)],
+  ["Bets that beat the index", "Closed positions that did better, after fees, than holding the index over the same days.",
+    (s) => (s.bets_compared ? `${s.bets_beating_index} of ${s.bets_compared}` : "no closed bets")],
   ["Worst drop", "The largest fall from a peak so far (max drawdown).", (s) => pct(s.max_drawdown_pct)],
   ["Risk-adjusted (Sharpe)", "Return per unit of risk. Needs at least 5 trading days.", (s) => (s.sharpe == null ? "needs more days" : s.sharpe.toFixed(2))],
   ["Winning trades", "Share of completed trades that made money before tax.", (s) => (s.win_rate_pct == null ? "no closed trades" : `${s.win_rate_pct.toFixed(0)}% of ${s.closed_trades}`)],

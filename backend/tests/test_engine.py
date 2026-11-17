@@ -651,3 +651,53 @@ def test_every_strategy_looks_at_once_when_a_simulation_starts_or_resumes(rig):
     rig.sims.transition(fresh["id"], "start")
     rig.engine.refresh_sim()
     assert reasons(rig.engine.runners["scripted"]) == ["simulation_started"]
+
+
+# ---------------------------------------------------------------- each bet against the index over the same days
+def test_each_sale_is_compared_with_holding_the_index_over_the_same_period(rig):
+    rig.quote("SPY", 499.9, 500.1)                  # SPY mid 500 when AAPL is bought
+    rig.quote("AAPL", 99.9, 100)
+    rig.scripted.script = [buy(qty=10), Decision([OrderRequest("AAPL", "sell", 4)]), Decision([OrderRequest("AAPL", "sell", 6)])]
+    rig.step()
+    rig.quote("AAPL", 100, 100)                     # bought 10 at 100, basis 1009
+    rig.quote("SPY", 504.9, 505.1)                  # index +1%
+    rig.step()
+    rig.quote("AAPL", 110, 110.1)                   # sold 4 at 110
+    sale = rig.ledger.entries(rig.engine.sim["id"], ("fill",))[-1].payload
+    # cost of 4 shares 403.6; gain 440 - 9 - 403.6 = 27.4 -> 6.79% ; index 505 / 500 - 1 = 1%
+    assert sale["vs_benchmark"] == {"benchmark": "SPY", "position_return_pct": 6.79, "benchmark_return_pct": 1.0}
+    rig.quote("SPY", 519.9, 520.1)                  # index +4% from the purchase
+    rig.step()
+    rig.quote("AAPL", 103, 103.1)                   # sold the other 6 at 103: made money but less than the index
+    last = rig.ledger.entries(rig.engine.sim["id"], ("fill",))[-1].payload["vs_benchmark"]
+    assert last["benchmark_return_pct"] == 4.0 and 0 < last["position_return_pct"] < 4.0
+    a = rig.acct()
+    assert (a.bench_bets, a.bench_wins) == (2, 1)
+    assert rig.new_engine().state.accounts["scripted"].bench_wins == 1        # rebuilt identically from the ledger
+
+
+def test_no_comparison_when_the_index_price_was_missing_at_purchase(rig):
+    rig.quote("AAPL", 99.9, 100)
+    rig.scripted.script = [buy(qty=10), Decision([OrderRequest("AAPL", "sell", 10)])]
+    rig.step()
+    rig.quote("AAPL", 100, 100)                     # no SPY quote yet: nothing to compare with
+    rig.quote("SPY", 499.9, 500.1)
+    rig.step()
+    rig.quote("AAPL", 110, 110.1)
+    assert "vs_benchmark" not in rig.ledger.entries(rig.engine.sim["id"], ("fill",))[-1].payload
+    assert rig.acct().bench_bets == 0
+
+
+def test_stock_ai_trader_is_set_up_for_days_to_weeks(tmp_path):
+    from tradelab.strategies.llm_agent import DECISION_SYSTEM, TRIAGE_SYSTEM
+    assert Settings(_env_file=None).llm_agent_interval_minutes == 120
+    assert "never be faster than the market" in DECISION_SYSTEM and "days to weeks" in TRIAGE_SYSTEM
+    reply = json.dumps({"summary": "s", "orders": [{"action": "buy", "ticker": "AAPL", "quantity": 10,
+                                                    "expected_holding_days": 15, "take_profit_price": 112, "stop_loss_price": 93}]})
+    r = EngineRig(tmp_path, strategies="llm_light", llm=FakeLLM([reply]))
+    r.quote("SPY", 499.9, 500.1)
+    r.quote("AAPL", 99.9, 100)
+    r.step("llm_light")
+    r.quote("AAPL", 100, 100)
+    fill = r.ledger.entries(r.engine.sim["id"], ("fill",), "llm_light")[-1].payload
+    assert fill["meta"]["expected_holding_days"] == 15 and fill["benchmark_price"] == "500.0"

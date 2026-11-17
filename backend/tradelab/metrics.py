@@ -114,6 +114,7 @@ def strategy_metrics(account, value: dict[str, Any], points: list[dict[str, Any]
         "turnover": float(account.traded_value) / deposits,
         "avg_cost_per_order": float(account.costs) / account.orders if account.orders else None,
         "token_spend": float(account.token_cost),
+        "bets_compared": account.bench_bets, "bets_beating_index": account.bench_wins,
     }
 
 

@@ -595,6 +595,7 @@ class Services:
                            realized_gain=float(p["realized_gain"]) if "realized_gain" in p else None,
                            rationale=meta.get("rationale"), summary=meta.get("summary"), confidence=meta.get("confidence"),
                            wakes=meta.get("wakes", []), news_ids=meta.get("news_ids", [])[:5],
+                           vs_benchmark=p.get("vs_benchmark"), expected_holding_days=meta.get("expected_holding_days"),
                            quote={"bid": self._shown(p["symbol"], price=p["quote"]["bid"])[1],
                                   "ask": self._shown(p["symbol"], price=p["quote"]["ask"])[1], "source": p["quote"]["source"],
                                   "recv_ts": p["quote"]["recv_ts"]}, by_risk_manager=meta.get("source") == "risk_manager", by_exit_plan=meta.get("source") == "exit_plan")

@@ -168,6 +168,12 @@ class Engine:
         self.broker = SimBroker(self.state, self.emit, self.market, self.profile,
                                 extra_latency_ms=int(s.get("extra_latency_ms") or 0),
                                 slippage_bps=D(str(s.get("slippage_bps") or 0)), risk_check=self.risk_check)
+        self.broker.benchmark_price = self._benchmark_price
+
+    def _benchmark_price(self, symbol: str) -> tuple[str, Decimal] | None:
+        bench = "BTC/USD" if is_crypto(symbol) else "SPY"
+        q = self.market.quotes.get(bench)
+        return (bench, (q.bid + q.ask) / 2) if q and q.valid() else None
 
     def refresh_sim(self) -> None:
         active = self.sims.active()
@@ -497,7 +503,12 @@ class Engine:
                 p = en.payload
                 trades.append({"at": en.recorded_at_utc[:16], "side": p["side"], "ticker": p["symbol"], "shares": p["qty"],
                                "price": float(p["price"]),
-                               **({"result_after_tax": round(float(D(p["realized_gain"]) - D(p["tax"])), 2)} if p["side"] == "sell" else {})})
+                               **({"result_after_tax": round(float(D(p["realized_gain"]) - D(p["tax"])), 2)} if p["side"] == "sell" else {}),
+                               **({"vs_index_same_period": {"this_bet_pct": p["vs_benchmark"]["position_return_pct"],
+                                                            "index_pct": p["vs_benchmark"]["benchmark_return_pct"]}}
+                                  if p.get("vs_benchmark") else {}),
+                               **({"planned_holding_days": p["meta"]["expected_holding_days"]}
+                                  if (p.get("meta") or {}).get("expected_holding_days") else {})})
             if self.relations:
                 relations = {s: g for s in symbols if (g := self.relations(s))}
         return Context(now, sid, wakes, self.state.accounts[sid], self.value(sid), self.broker.available_cash(sid),

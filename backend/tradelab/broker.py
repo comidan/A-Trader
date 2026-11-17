@@ -48,6 +48,9 @@ class SimBroker:
         self.slippage = D(slippage_bps) / D(10000)
         self.risk_check = risk_check
         self._used: dict[tuple[str, str, str], tuple[int, int]] = {}   # (strategy, symbol, side) -> (quote seq, shares used)
+        # Price of the index the strategy is judged against (SPY for stocks, Bitcoin for crypto), recorded with
+        # every fill so each closed position can be compared with simply holding the index over the same days.
+        self.benchmark_price: Callable[[str], tuple[str, Decimal] | None] = lambda symbol: None
 
     # ------------------------------------------------------------------ submit
     def _open(self, symbol: str, now: datetime) -> bool:
@@ -193,10 +196,19 @@ class SimBroker:
             "commission": str(commission), "quote": q.to_dict(), "order_ready_ts": o.ready_ts.isoformat(),
             "remaining_after": o.remaining - qty, "meta": o.meta,
         }
+        bench = self.benchmark_price(o.symbol)
+        if bench:
+            payload.update(benchmark_symbol=bench[0], benchmark_price=str(bench[1]))
         if not buy:
             pos = acct.positions[o.symbol]
             cost = pos.basis * qty / pos.qty if qty < pos.qty else pos.basis
             gain = qty * price - commission - cost
+            if bench and pos.bench_complete and pos.bench_units > 0 and cost > 0:
+                entry = pos.bench_units / pos.qty
+                payload["vs_benchmark"] = {
+                    "benchmark": bench[0],
+                    "position_return_pct": round(float(gain / cost) * 100, 2),            # after both commissions, before tax
+                    "benchmark_return_pct": round(float(bench[1] / entry - 1) * 100, 2)}  # holding the index, no costs
             year = self.market.tax_year(q.recv_ts)
             etf = self.market.is_etf(o.symbol)
             t = tax_on_sale(acct, gain, etf, year, self.profile, tax_class(o.symbol, etf))

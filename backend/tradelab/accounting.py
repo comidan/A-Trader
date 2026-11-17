@@ -24,6 +24,8 @@ from .models import CENT, BrokerProfile, D, Order, d, is_crypto
 class Position:
     qty: int = 0
     basis: Decimal = D(0)          # total cost of the shares held, commissions included
+    bench_units: Decimal = D(0)    # sum over purchases of shares x benchmark price at that moment
+    bench_complete: bool = True    # False if a purchase happened without a benchmark price
 
     @property
     def avg_cost(self) -> Decimal:
@@ -48,6 +50,8 @@ class Account:
     closed_trades: int = 0
     winning_trades: int = 0
     traded_value: Decimal = D(0)
+    bench_bets: int = 0             # closed sales compared with the benchmark over the same holding period
+    bench_wins: int = 0
 
     def qty(self, symbol: str) -> int:
         p = self.positions.get(symbol)
@@ -191,11 +195,20 @@ def _apply_fill(state: SimState, a: Account, p: dict[str, Any]) -> None:
         a.cash -= qty * price + commission
         pos.qty += qty
         pos.basis += qty * price + commission
+        if p.get("benchmark_price"):
+            pos.bench_units += qty * d(p["benchmark_price"])
+        else:
+            pos.bench_complete = False
     else:
         cost = d(p["cost_basis"])
         a.cash += qty * price - commission - d(p["tax"])
+        pos.bench_units -= pos.bench_units * qty / pos.qty
         pos.qty -= qty
         pos.basis -= cost
+        vs = p.get("vs_benchmark")
+        if vs:
+            a.bench_bets += 1
+            a.bench_wins += 1 if vs["position_return_pct"] > vs["benchmark_return_pct"] else 0
         a.taxes += d(p["tax"])
         gain = d(p["realized_gain"])
         a.realized_gain += gain
